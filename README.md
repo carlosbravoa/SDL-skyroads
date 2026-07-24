@@ -1,4 +1,4 @@
-# Skyroads-c
+# SDL Skyroads
 
 A native **C++17** reimplementation of the 1993 DOS game **SkyRoads**, rendered
 and driven through SDL2. It loads the original game's data files directly,
