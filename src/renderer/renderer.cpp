@@ -452,9 +452,14 @@ DerivedShipVisualState derive_ship_visual_state(const DemoPlaybackState& scene) 
         (scene.ship.x_position - LEVEL_CENTER_X) / LEVEL_TILE_STRIDE_X;
     const int32_t ship_lane_bias = static_cast<int32_t>(std::round(lane_bias * 30.0));
     const int32_t ship_screen_bias_x = std::clamp(ship_lane_bias, -96, 96);
+    // Altitude maps 1:1 to screen pixels, with no scaling and no clamp. The EXE
+    // passes the ship's height to the renderer as ds:0xe38 = y_raw/0x80 (i.e. y in
+    // world units, @0xd3a/0xdc5) and the ship blit puts the sprite's top row at
+    // 0x9D - ds:0xe38 = 157 - y (@0x324e-0x325a). A scaled/clamped offset makes the
+    // ship sink into raised roads and understates jump height.
     const double height_delta = scene.ship.y_position - GROUND_Y;
-    const int32_t vertical_offset_y = static_cast<int32_t>(
-        std::clamp(std::round(-height_delta * 0.55), -26.0, 18.0));
+    const int32_t vertical_offset_y =
+        static_cast<int32_t>(std::lround(-height_delta));
 
     std::size_t explosion_frame = 0;
     if (scene.ship.death_frame_index.has_value()) {
@@ -487,6 +492,7 @@ DerivedShipVisualState derive_ship_visual_state(const DemoPlaybackState& scene) 
     v.exact_ship_frame_index = exact_ship_frame_index;
     v.ship_screen_bias_x = ship_screen_bias_x;
     v.vertical_offset_y = vertical_offset_y;
+    v.support_y = scene.ship.support_y;
     v.on_surface = scene.ship.is_on_ground && scene.ship.state == ShipState::Alive;
     v.casts_shadow = scene.ship.state == ShipState::Alive;
     return v;
@@ -516,10 +522,16 @@ ShipScreenPlacement ship_screen_placement_from_slices(
         (static_cast<int>(std::floor(scene.ship.x_position)) - 95) / 46, 0, 6);
     const int32_t center_x =
         static_cast<int32_t>(std::lround(scene.ship.x_position)) - 95 + lane_adj[lane];
-    const int32_t shadow_center_y = SHIP_SCREEN_Y + 18;
-    // Sit the ship on the ground (its wheels/engines near the shadow) rather than
-    // hovering above it. On the ground vertical_offset_y is 0; a jump lifts it.
-    const int32_t sprite_center_y = SHIP_SCREEN_Y + 4 + visual.vertical_offset_y;
+    // Exact DOS screen-Y: sprite top row = 157 - y (blit @0x324e), and our sprite
+    // is 24 tall, so centre = 157 - y + 12 = 169 - y. At ground level (y = 80) that
+    // is 89 = SHIP_SCREEN_Y + 5, and vertical_offset_y carries the exact 1:1
+    // altitude delta from there.
+    const int32_t sprite_center_y = SHIP_SCREEN_Y + 5 + visual.vertical_offset_y;
+    // The shadow stays on whatever surface is holding the ship up, using the same
+    // 1:1 mapping, so it does not detach on roads made of raised blocks.
+    const int32_t surface_offset_y =
+        static_cast<int32_t>(std::lround(-(visual.support_y - GROUND_Y)));
+    const int32_t shadow_center_y = SHIP_SCREEN_Y + 18 + surface_offset_y;
     return ShipScreenPlacement{center_x, sprite_center_y, center_x,
                                shadow_center_y};
 }
@@ -1400,7 +1412,10 @@ void ReferenceRenderer::draw_ship_shadow(FrameBuffer320x200& frame,
     if (!visual.casts_shadow) return;
     const int32_t shadow_center_x = placement.shadow_center_x;
     const int32_t shadow_center_y = placement.shadow_center_y;
-    const int32_t hover = std::max(-visual.vertical_offset_y, 0);
+    // Height above the surface below (not above road level), so a ship resting on a
+    // raised block gets a full-size shadow rather than a shrunken one.
+    const int32_t hover =
+        std::max((shadow_center_y - placement.sprite_center_y) - 13, 0);
     const int32_t radius_x = std::clamp(9 - hover / 6, 4, 9);
     const int32_t radius_y = std::clamp(4 - hover / 10, 2, 4);
     for (int32_t dy = -radius_y; dy <= radius_y; ++dy) {

@@ -94,6 +94,9 @@ struct DerivedShipVisualState {
     std::optional<std::size_t> exact_ship_frame_index;
     int32_t ship_screen_bias_x;
     int32_t vertical_offset_y;
+    // Height of the surface currently supporting the ship (the road, or the top of
+    // a raised block), so the shadow can sit on it instead of a fixed row.
+    double support_y;
     bool on_surface;
     // False once the ship is dead: a crashed ship has no shadow, and a ship that
     // fell off the road has no road left under it to cast one on.

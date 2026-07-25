@@ -102,6 +102,8 @@ struct ShipRenderState {
     ShipState state;
     bool is_on_ground;
     bool is_going_up;
+    // Height of the surface under the ship (road level, or a raised block's top).
+    double support_y;
     int8_t turn_input;
     int8_t accel_input;
     bool jump_input;

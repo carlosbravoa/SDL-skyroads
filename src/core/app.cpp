@@ -70,6 +70,10 @@ ShipRenderState build_ship_render_state(const GameplaySession& session) {
     s.state = session.ship.state;
     s.is_on_ground = session.ship.is_on_ground;
     s.is_going_up = session.ship.is_going_up;
+    // Resting on a surface: that surface is right under us. Airborne: the surface we
+    // left. Either way the shadow lands on solid ground rather than a fixed row.
+    s.support_y = session.ship.is_on_ground ? session.ship.y_position
+                                            : session.ship.jumped_from_y_position;
     s.turn_input = session.last_controls.turn_input;
     s.accel_input = session.last_controls.accel_input;
     s.jump_input = session.last_controls.jump_input;
