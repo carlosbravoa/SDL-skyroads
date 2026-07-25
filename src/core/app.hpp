@@ -123,6 +123,8 @@ struct DemoPlaybackState {
     std::vector<RoadRenderRow> rows;
     bool did_win;
     bool is_demo;
+    // Result text waits on this so it never covers the explosion / the ship falling.
+    bool death_animation_finished;
     ShipState craft_state;
     GameSnapshot snapshot;
     ShipRenderState ship;

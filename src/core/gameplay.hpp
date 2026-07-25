@@ -135,6 +135,14 @@ struct GameplayFrameResult {
     std::size_t road_row_index;
 };
 
+// How long the game keeps simulating after the ship dies, so the death plays out
+// on screen (EXE @0x2200, re/NOTES.md Update 9). A crash runs the explosion
+// counter ds:0x4578 for 42 ticks (14 sprites x 3 ticks each) and then ends
+// immediately; every other death instead dwells on ds:0x4566 until 108 ticks,
+// which is what lets a ship that fell off the road drop out of view.
+constexpr std::size_t EXPLOSION_DEATH_TICKS = 42;
+constexpr std::size_t OTHER_DEATH_TICKS = 108;
+
 struct GameplaySession {
     Level level;
     Ship ship;
@@ -148,6 +156,9 @@ struct GameplaySession {
     explicit GameplaySession(Level level);
 
     std::size_t frame_index() const { return frame_index_; }
+    // True once the ship is dead AND its death animation has run its course, i.e.
+    // when the original would stop simulating and report the outcome.
+    bool death_animation_finished() const;
     GameplayFrameResult run_frame(ControllerState controls);
     GameplayFrameResult run_demo_frame(const DemoRecording& demo);
 };

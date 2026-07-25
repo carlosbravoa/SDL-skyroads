@@ -95,6 +95,9 @@ struct DerivedShipVisualState {
     int32_t ship_screen_bias_x;
     int32_t vertical_offset_y;
     bool on_surface;
+    // False once the ship is dead: a crashed ship has no shadow, and a ship that
+    // fell off the road has no road left under it to cast one on.
+    bool casts_shadow;
 };
 
 struct ShipScreenPlacement {

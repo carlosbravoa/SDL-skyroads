@@ -174,7 +174,10 @@ static void test_fall_below_ground(const RoadsArchive& roads) {
     CHECK_TRUE(frame.events.empty());
 }
 
-static void test_fallen_no_advance(const RoadsArchive& roads) {
+// A ship that fell off the road keeps falling: the EXE's motion integrator
+// (@0x1900..0x1a9b) has no death-code gate, so gravity and drift keep being
+// applied and the ship drops out of view. Only player input is cut off.
+static void test_fallen_keeps_falling(const RoadsArchive& roads) {
     Level level = level_from_road_entry(roads.roads[0]);
     GameplaySession session(level);
     session.ship.state = ShipState::Fallen;
@@ -188,10 +191,18 @@ static void test_fallen_no_advance(const RoadsArchive& roads) {
     Ship before = session.ship;
     GameplayFrameResult frame = session.run_frame(ControllerState::make(1, 1, true));
     CHECK_TRUE(frame.snapshot.craft_state == ShipState::Fallen);
-    CHECK_EQ(session.ship.x_position, before.x_position);
-    CHECK_EQ(session.ship.y_position, before.y_position);
-    CHECK_EQ(session.ship.z_position, before.z_position);
+    CHECK_TRUE(session.ship.y_position < before.y_position);
+    CHECK_TRUE(session.ship.z_position > before.z_position);
     CHECK_TRUE(frame.events.empty());
+
+    // The death animation must run for a while before the result screen shows,
+    // so the fall is actually visible (108 ticks in the EXE).
+    CHECK_TRUE(!session.death_animation_finished());
+    for (std::size_t i = 0; i < OTHER_DEATH_TICKS + 1; ++i) {
+        session.run_frame(ControllerState::neutral());
+    }
+    CHECK_TRUE(session.death_animation_finished());
+    CHECK_TRUE(session.ship.y_position < 0.0); // fell well below the road
 }
 
 // ---- app state machine -----------------------------------------------------
@@ -385,7 +396,7 @@ CHECK_MAIN_BEGIN()
     test_first_demo_frame(roads, demo);
     test_later_demo_frames(roads, demo);
     test_fall_below_ground(roads);
-    test_fallen_no_advance(roads);
+    test_fallen_keeps_falling(roads);
 
     test_app_intro(roads, demo);
     test_app_skip_intro(roads, demo);

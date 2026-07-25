@@ -222,7 +222,6 @@ void Ship::update_gravity(double gravity_acceleration) {
 }
 
 void Ship::attempt_motion(bool on_decel_pad) {
-    const bool is_dead = state != ShipState::Alive;
     double motion_vel = z_velocity;
     if (!on_decel_pad) {
         motion_vel += 0x618 / 65536.0;
@@ -230,11 +229,13 @@ void Ship::attempt_motion(bool on_decel_pad) {
     const double x_motion = s_floor(x_movement_base * 128.0) *
                                 s_floor(motion_vel * 65536.0) / 65536.0 +
                             slide_amount;
-    if (!is_dead) {
-        x_position += x_motion;
-        y_position += y_velocity;
-        z_position += z_velocity;
-    }
+    // Motion keeps being integrated after death: the EXE's motion integrator
+    // (@0x1900..0x1a9b) has no death-code gate, which is what lets a ship that
+    // fell off the road keep dropping out of view. Only the *inputs* are cut
+    // (can_control), so x_movement_base decays to 0 on its own.
+    x_position += x_motion;
+    y_position += y_velocity;
+    z_position += z_velocity;
 }
 
 void Ship::move_to(const Ship& dest, const Level& level) {
@@ -546,13 +547,26 @@ double Ship::clamp_z_velocity(double z_velocity_in) const {
 GameplaySession::GameplaySession(Level level_in)
     : level(std::move(level_in)), ship(), expected_ship(ship) {}
 
+bool GameplaySession::death_animation_finished() const {
+    if (ship.state == ShipState::Alive) return false;
+    if (!death_frame_index.has_value()) return true;
+    const std::size_t elapsed = frame_index_ - *death_frame_index;
+    const std::size_t needed = ship.state == ShipState::Exploded
+                                   ? EXPLOSION_DEATH_TICKS
+                                   : OTHER_DEATH_TICKS;
+    return elapsed >= needed;
+}
+
 GameplayFrameResult GameplaySession::run_frame(ControllerState controls) {
     last_controls = controls;
     const ShipState previous_state = ship.state;
     std::vector<GameplayEvent> events =
         ship.update(level, expected_ship, controls);
-    if (previous_state == ShipState::Alive && ship.state != ShipState::Alive &&
-        !death_frame_index.has_value()) {
+    // Stamp the tick the ship died on, which drives the death animation. Keyed on
+    // "dead and not yet stamped" rather than on the Alive->dead edge so that a
+    // session seeded into a dead state still animates.
+    (void)previous_state;
+    if (ship.state != ShipState::Alive && !death_frame_index.has_value()) {
         death_frame_index = frame_index_;
     }
     if (ship.z_position >= static_cast<double>(level.length()) - 0.5 &&

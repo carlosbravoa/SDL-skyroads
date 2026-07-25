@@ -433,11 +433,15 @@ DerivedShipVisualState derive_ship_visual_state(const DemoPlaybackState& scene) 
     else if (lane_index == 3) bank = ShipBank::Center;
     else bank = ShipBank::Right;
 
+    // Death animations (EXE @0xc02, re/NOTES.md Update 9): only a CRASH runs the
+    // explosion counter ds:0x4578. Falling off the road / running out of fuel or
+    // oxygen leave it at 0, so the normal flight pose keeps being drawn while the
+    // ship falls away — there is no explosion for those.
     ShipSpriteKind sprite_kind;
     switch (scene.ship.state) {
-        case ShipState::Alive: sprite_kind = ShipSpriteKind::Alive; break;
         case ShipState::Exploded: sprite_kind = ShipSpriteKind::Exploding; break;
-        default: sprite_kind = ShipSpriteKind::Destroyed; break;
+        case ShipState::Alive:
+        default: sprite_kind = ShipSpriteKind::Alive; break;
     }
 
     const bool jumping = scene.ship.y_position > GROUND_Y + 0.5 ||
@@ -462,11 +466,14 @@ DerivedShipVisualState derive_ship_visual_state(const DemoPlaybackState& scene) 
     //   is based at sprite 14, so the array index drops the +14. thrust is the
     //   engine-flicker animation (added later); 0 gives the static pose.
     std::optional<std::size_t> exact_ship_frame_index;
-    if (scene.ship.state == ShipState::Alive) {
+    if (sprite_kind == ShipSpriteKind::Alive) {
         const int32_t v = std::clamp(vertical_state, 0, 2);
-        // Thrust flicker: table ds:0xea = {0,1,2,1}, cycled by (frame/2)%4.
+        // Thrust flicker: table ds:0xea = {0,1,2,1}, cycled by (frame/2)%4. With
+        // no fuel the EXE forces the thrust value to 0 (engine flame off, @0xc26).
         static const int thrust_cycle[4] = {0, 1, 2, 1};
-        const int thrust = thrust_cycle[(scene.frame_index / 2) % 4];
+        const int thrust = scene.ship.state == ShipState::OutOfFuel
+                               ? 0
+                               : thrust_cycle[(scene.frame_index / 2) % 4];
         exact_ship_frame_index =
             static_cast<std::size_t>((lane_index * 3 + v) * 3 + thrust);
     }
@@ -481,6 +488,7 @@ DerivedShipVisualState derive_ship_visual_state(const DemoPlaybackState& scene) 
     v.ship_screen_bias_x = ship_screen_bias_x;
     v.vertical_offset_y = vertical_offset_y;
     v.on_surface = scene.ship.is_on_ground && scene.ship.state == ShipState::Alive;
+    v.casts_shadow = scene.ship.state == ShipState::Alive;
     return v;
 }
 
@@ -1164,8 +1172,17 @@ void ReferenceRenderer::render_play_scene(FrameBuffer320x200& frame,
         if (scene.did_win) {
             draw_text_centered(frame, "LEVEL COMPLETE", 56, RgbColor(150, 255, 170), 2);
             draw_text_centered(frame, "PRESS ENTER", 76, RgbColor(220, 235, 255), 1);
-        } else if (scene.snapshot.craft_state != ShipState::Alive) {
-            draw_text_centered(frame, "CRASHED", 56, RgbColor(255, 110, 110), 2);
+        } else if (scene.snapshot.craft_state != ShipState::Alive &&
+                   scene.death_animation_finished) {
+            // The five outcomes the EXE distinguishes (ds:0x457c, NOTES Update 9).
+            const char* reason = "CRASHED";
+            switch (scene.snapshot.craft_state) {
+                case ShipState::Fallen: reason = "FELL OFF THE ROAD"; break;
+                case ShipState::OutOfFuel: reason = "OUT OF FUEL"; break;
+                case ShipState::OutOfOxygen: reason = "OUT OF OXYGEN"; break;
+                default: break;
+            }
+            draw_text_centered(frame, reason, 56, RgbColor(255, 110, 110), 2);
             draw_text_centered(frame, "PRESS ENTER", 76, RgbColor(220, 235, 255), 1);
         }
     }
@@ -1219,6 +1236,12 @@ void ReferenceRenderer::draw_ship_sprite(FrameBuffer320x200& frame,
                                          const DerivedShipVisualState& visual,
                                          ShipScreenPlacement placement) const {
     if (!car_atlas_) return;
+    // EXE @0xc18: once the explosion counter passes the 14th frame the sprite
+    // index becomes -1, i.e. the wreck stops being drawn at all.
+    if (visual.sprite_kind == ShipSpriteKind::Exploding &&
+        visual.explosion_frame >= car_atlas_->explosion_frames.size()) {
+        return;
+    }
     const ImageFrame& sprite = car_atlas_->select_sprite(visual, frame_index);
     const std::size_t draw_width = static_cast<std::size_t>(sprite.width) * SHIP_SCALE;
     const std::size_t draw_height = static_cast<std::size_t>(sprite.height) * SHIP_SCALE;
@@ -1374,7 +1397,7 @@ void ReferenceRenderer::draw_ship_shadow(FrameBuffer320x200& frame,
                                          ShipScreenPlacement placement) const {
     // Draw the ground shadow whenever alive (including mid-jump) — the original
     // keeps it on the ground below the ship. It shrinks with height via `hover`.
-    if (visual.sprite_kind != ShipSpriteKind::Alive) return;
+    if (!visual.casts_shadow) return;
     const int32_t shadow_center_x = placement.shadow_center_x;
     const int32_t shadow_center_y = placement.shadow_center_y;
     const int32_t hover = std::max(-visual.vertical_offset_y, 0);

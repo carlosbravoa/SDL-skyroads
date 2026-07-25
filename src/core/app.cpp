@@ -308,6 +308,18 @@ void AttractModeApp::tick_gameplay(AppInput input,
         return;
     }
 
+    // While the ship is dying, keep simulating so the death plays out on screen:
+    // a crash runs its explosion animation, and a ship that fell off the road
+    // keeps falling out of view. Only then show the result.
+    const bool dying = gameplay_session_.ship.state != ShipState::Alive &&
+                       !gameplay_session_.death_animation_finished();
+    if (dying && !gameplay_session_.did_win) {
+        GameplayFrameResult result =
+            gameplay_session_.run_frame(input.gameplay_controls());
+        emit_sfx_for_events(result.events, audio);
+        return;
+    }
+
     const bool over = gameplay_session_.did_win ||
                       gameplay_session_.ship.state != ShipState::Alive;
     if (over) {
@@ -525,6 +537,7 @@ DemoPlaybackState AttractModeApp::build_play_scene(const GameplaySession& sessio
     state.rows = std::move(rows);
     state.did_win = session.did_win;
     state.is_demo = is_demo;
+    state.death_animation_finished = session.death_animation_finished();
     state.craft_state = session.ship.state;
     state.snapshot = GameSnapshot{
         session.ship.x_position,
