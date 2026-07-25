@@ -199,6 +199,11 @@ public:
     DemoPlaybackState current_gameplay_scene() const;
     DemoPlaybackState current_demo_scene() const;
     GoMenuScene current_go_menu_scene() const;
+    // Per-road completion counts, so the host can persist them to skyroads.cfg.
+    const std::array<uint8_t, 30>& road_completions() const { return road_completions_; }
+    void set_road_completions(const std::array<uint8_t, 30>& counts) {
+        road_completions_ = counts;
+    }
 
 private:
     void tick_intro(AppInput input, std::vector<AudioCommand>& audio);

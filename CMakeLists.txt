@@ -23,6 +23,7 @@ add_library(skyroads_data
   src/data/sound.cpp
   src/data/dashboard.cpp
   src/data/demo.cpp
+  src/data/config.cpp
   src/data/roads.cpp
   src/data/level.cpp
   src/data/trekdat.cpp

@@ -14,6 +14,7 @@
 
 #include "audio/audio.hpp"
 #include "core/core.hpp"
+#include "data/config.hpp"
 #include "data/data.hpp"
 #include "renderer/renderer.hpp"
 
@@ -200,6 +201,29 @@ int run(const std::string& source_root) {
     audio::AudioMixer audio_mixer(audio::AttractAudioAssets::load_from_root(source_root));
     core::AttractModeApp app(std::move(levels), demo);
 
+    // Progress lives in skyroads.cfg next to the game data, as in the original.
+    const std::string config_path = source_root + "/skyroads.cfg";
+    data::GameConfig config = data::load_game_config(config_path);
+    {
+        std::array<uint8_t, 30> counts{};
+        for (std::size_t i = 0; i < counts.size(); ++i) {
+            counts[i] = static_cast<uint8_t>(std::min<uint16_t>(
+                config.road_completions[i], 255));
+        }
+        app.set_road_completions(counts);
+    }
+    auto persist_progress = [&]() {
+        const auto& counts = app.road_completions();
+        bool changed = false;
+        for (std::size_t i = 0; i < counts.size(); ++i) {
+            if (config.road_completions[i] != counts[i]) {
+                config.road_completions[i] = counts[i];
+                changed = true;
+            }
+        }
+        if (changed) data::save_game_config(config_path, config);
+    };
+
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
         std::fprintf(stderr, "error: SDL_Init: %s\n", SDL_GetError());
         return 1;
@@ -277,6 +301,9 @@ int run(const std::string& source_root) {
                 app_input = input.app;
             }
             core::AppTickResult tick = app.tick(app_input);
+            // The original saves as soon as a road is completed; this only writes
+            // when a count actually changed, so it is cheap to check each tick.
+            persist_progress();
             apply_audio_commands(audio_mixer, audio_device, tick.audio_commands);
             if (tick.mode != current_mode) {
                 current_mode = tick.mode;
@@ -310,6 +337,7 @@ int run(const std::string& source_root) {
     SDL_DestroyTexture(texture);
     SDL_DestroyRenderer(presenter);
     SDL_DestroyWindow(window);
+    persist_progress();
     SDL_Quit();
     return 0;
 }

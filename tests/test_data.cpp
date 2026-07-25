@@ -6,6 +6,7 @@
 
 #include "check.hpp"
 #include "data/data.hpp"
+#include "data/config.hpp"
 
 using namespace skyroads::data;
 
@@ -209,7 +210,42 @@ static void test_exe() {
                                     0x3AAD, 0x3AAD, 0x3AAD, 0x3AAD}));
 }
 
+
+// skyroads.cfg: 66 bytes, word 0 a checksum, words 3.. the 30 completion counts.
+// A missing file or a bad checksum resets progress, as the original does.
+static void test_game_config_roundtrip() {
+    using skyroads::data::GameConfig;
+    const std::string path = "test_skyroads_cfg.tmp";
+    std::remove(path.c_str());
+
+    GameConfig fresh = skyroads::data::load_game_config(path);
+    for (auto count : fresh.road_completions) CHECK_EQ(count, static_cast<uint16_t>(0));
+
+    GameConfig saved;
+    saved.setting_a = 0x1234;
+    saved.setting_b = 7;
+    saved.road_completions[0] = 3;
+    saved.road_completions[29] = 1;
+    CHECK_TRUE(skyroads::data::save_game_config(path, saved));
+
+    GameConfig loaded = skyroads::data::load_game_config(path);
+    CHECK_EQ(loaded.setting_a, static_cast<uint16_t>(0x1234));
+    CHECK_EQ(loaded.road_completions[0], static_cast<uint16_t>(3));
+    CHECK_EQ(loaded.road_completions[29], static_cast<uint16_t>(1));
+
+    // Corrupt the checksum word -> everything resets.
+    std::FILE* f = std::fopen(path.c_str(), "r+b");
+    CHECK_TRUE(f != nullptr);
+    const unsigned char bad[2] = {0xAA, 0xBB};
+    std::fwrite(bad, 1, 2, f);
+    std::fclose(f);
+    GameConfig reset = skyroads::data::load_game_config(path);
+    for (auto count : reset.road_completions) CHECK_EQ(count, static_cast<uint16_t>(0));
+    std::remove(path.c_str());
+}
+
 CHECK_MAIN_BEGIN()
+    test_game_config_roundtrip();
     test_compression();
     test_image();
     test_sound();
