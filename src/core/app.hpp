@@ -126,6 +126,7 @@ struct DemoPlaybackState {
     ShipState craft_state;
     GameSnapshot snapshot;
     ShipRenderState ship;
+    std::vector<skyroads::data::RgbColor> road_palette; // this road's VGA palette
 };
 
 struct MainMenuScene {

@@ -262,14 +262,19 @@ static void test_app_select_navigates_world(const RoadsArchive& roads,
     AttractModeApp app = make_app(roads, demo);
     for (int i = 0; i < 35; ++i) app.tick(AppInput{});
     app.tick(key(&AppInput::space));
-    app.tick(key(&AppInput::enter)); // -> GoMenu (world 0)
-    app.tick(key(&AppInput::right)); // world 1
-    AppTickResult sel = app.tick(key(&AppInput::down)); // level 1
+    app.tick(key(&AppInput::enter)); // -> GoMenu (world 0, road 0)
+    // Grid navigation: Down spills into the next world in the column.
+    app.tick(key(&AppInput::down)); // world 0, road 1
+    app.tick(key(&AppInput::down)); // world 0, road 2
+    AppTickResult sel = app.tick(key(&AppInput::down)); // -> world 1, road 0
     CHECK_TRUE(sel.mode == AppMode::GoMenu);
-    // world index 1, level index 1 -> road = 1*3 + 1 + 1 = 5.
     CHECK_EQ(sel.render_scene.go_menu.selected_world, static_cast<std::size_t>(1));
-    CHECK_EQ(sel.render_scene.go_menu.selected_level, static_cast<std::size_t>(1));
-    CHECK_EQ(sel.render_scene.go_menu.road_index, static_cast<std::size_t>(5));
+    CHECK_EQ(sel.render_scene.go_menu.selected_level, static_cast<std::size_t>(0));
+    // world 1, road 0 -> road index = 1*3 + 0 + 1 = 4.
+    CHECK_EQ(sel.render_scene.go_menu.road_index, static_cast<std::size_t>(4));
+    // Right switches to the other column (world +5).
+    AppTickResult col = app.tick(key(&AppInput::right));
+    CHECK_EQ(col.render_scene.go_menu.selected_world, static_cast<std::size_t>(6));
     AppTickResult play = app.tick(key(&AppInput::enter));
     CHECK_TRUE(play.mode == AppMode::Gameplay);
 }

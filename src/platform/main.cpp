@@ -23,7 +23,16 @@ namespace {
 
 constexpr int WINDOW_WIDTH = 1280;
 constexpr int WINDOW_HEIGHT = 960;
-constexpr uint64_t SIMULATION_HZ = 70;
+// The DOS game reprograms the PIT to 180.02 Hz (divisor 0x19E4) and ticks the
+// game/physics clock once every 5 interrupts -> ~36 Hz. Matching that rate is
+// essential: at the old 70 Hz the whole game ran ~1.94x too fast (and jumps felt
+// low/snappy instead of the original's floatier ascent). See re/NOTES.md.
+// Default physics rate. The exact DOS design rate is ~36 Hz (see re/NOTES.md),
+// but SkyRoads runs faster than that on quick hardware / DOSBox, so this is
+// tunable live with the +/- keys to match a reference. Range clamped below.
+constexpr uint64_t SIMULATION_HZ_DEFAULT = 36;
+constexpr uint64_t SIMULATION_HZ_MIN = 12;
+constexpr uint64_t SIMULATION_HZ_MAX = 120;
 constexpr int MAX_CATCH_UP_STEPS = 4;
 constexpr uint16_t AUDIO_DEVICE_BUFFER_SAMPLES = 1024;
 constexpr std::size_t AUDIO_QUEUE_LOW_WATER_SAMPLES = 2048;
@@ -31,12 +40,15 @@ constexpr std::size_t AUDIO_QUEUE_TARGET_SAMPLES = 4096;
 
 struct KeyEdges {
     bool up, down, left, right, debug_toggle, enter, escape, space, quit;
+    bool rate_up, rate_down;
 };
 
 struct HostInput {
     core::AppInput app;
     bool debug_toggle = false;
     bool quit = false;
+    bool rate_up = false;
+    bool rate_down = false;
 };
 
 bool take_edge(bool& previous, bool current) {
@@ -48,6 +60,7 @@ bool take_edge(bool& previous, bool current) {
 struct KeyLatch {
     bool up = false, down = false, left = false, right = false;
     bool debug_toggle = false, enter = false, escape = false, space = false, quit = false;
+    bool rate_up = false, rate_down = false;
 
     HostInput sample(const Uint8* kb) {
         const KeyEdges current{
@@ -59,11 +72,15 @@ struct KeyLatch {
             static_cast<bool>(kb[SDL_SCANCODE_RETURN]),
             static_cast<bool>(kb[SDL_SCANCODE_ESCAPE]),
             static_cast<bool>(kb[SDL_SCANCODE_SPACE]),
-            static_cast<bool>(kb[SDL_SCANCODE_Q])};
+            static_cast<bool>(kb[SDL_SCANCODE_Q]),
+            static_cast<bool>(kb[SDL_SCANCODE_EQUALS] || kb[SDL_SCANCODE_KP_PLUS]),
+            static_cast<bool>(kb[SDL_SCANCODE_MINUS] || kb[SDL_SCANCODE_KP_MINUS])};
 
         HostInput out;
         out.debug_toggle = take_edge(debug_toggle, current.debug_toggle);
         out.quit = take_edge(quit, current.quit);
+        out.rate_up = take_edge(rate_up, current.rate_up);
+        out.rate_down = take_edge(rate_down, current.rate_down);
         out.app.up = take_edge(up, current.up);
         out.app.down = take_edge(down, current.down);
         out.app.left = take_edge(left, current.left);
@@ -106,8 +123,10 @@ const char* mode_label(core::AppMode mode) {
     return "?";
 }
 
-std::string window_title(core::AppMode mode, renderer::DebugViewMode debug_view) {
+std::string window_title(core::AppMode mode, renderer::DebugViewMode debug_view,
+                         uint64_t sim_hz) {
     std::string t = std::string("SkyRoads Native | ") + mode_label(mode);
+    t += " | " + std::to_string(sim_hz) + " Hz";
     if (debug_view != renderer::DebugViewMode::Off) {
         t += " | Debug ";
         t += renderer::debug_label(debug_view);
@@ -163,6 +182,7 @@ void print_controls(const std::string& source_root) {
     std::printf("  Space      skip intro, jump, restart after crash/win\n");
     std::printf("  Tab        cycle debug views\n");
     std::printf("  Escape     back to menu\n");
+    std::printf("  + / -      physics rate up/down (shown in the title bar)\n");
     std::printf("  Q          quit\n");
 }
 
@@ -213,10 +233,11 @@ int run(const std::string& source_root) {
     core::AppMode current_mode = initial.mode;
     core::RenderScene current_scene = initial.render_scene;
     renderer::DebugViewMode debug_view = renderer::DebugViewMode::Off;
-    SDL_SetWindowTitle(window, window_title(current_mode, debug_view).c_str());
+    uint64_t sim_hz = SIMULATION_HZ_DEFAULT;
+    SDL_SetWindowTitle(window, window_title(current_mode, debug_view, sim_hz).c_str());
 
     using clock = std::chrono::steady_clock;
-    const auto timestep = std::chrono::nanoseconds(1'000'000'000 / SIMULATION_HZ);
+    auto timestep = std::chrono::nanoseconds(1'000'000'000 / sim_hz);
     auto next_tick = clock::now() + timestep;
     KeyLatch latch;
     bool running = true;
@@ -231,7 +252,17 @@ int run(const std::string& source_root) {
         if (input.quit) break;
         if (input.debug_toggle) {
             debug_view = renderer::debug_next(debug_view);
-            SDL_SetWindowTitle(window, window_title(current_mode, debug_view).c_str());
+            SDL_SetWindowTitle(window, window_title(current_mode, debug_view, sim_hz).c_str());
+        }
+        // Live physics-rate tuning with +/- (until we lock the faithful rate).
+        if (input.rate_up || input.rate_down) {
+            const uint64_t step = 2;
+            if (input.rate_up && sim_hz + step <= SIMULATION_HZ_MAX) sim_hz += step;
+            if (input.rate_down && sim_hz >= SIMULATION_HZ_MIN + step) sim_hz -= step;
+            timestep = std::chrono::nanoseconds(1'000'000'000 / sim_hz);
+            next_tick = clock::now() + timestep;
+            std::printf("physics rate: %llu Hz\n", static_cast<unsigned long long>(sim_hz));
+            SDL_SetWindowTitle(window, window_title(current_mode, debug_view, sim_hz).c_str());
         }
 
         int step_count = 0;
@@ -249,7 +280,7 @@ int run(const std::string& source_root) {
             apply_audio_commands(audio_mixer, audio_device, tick.audio_commands);
             if (tick.mode != current_mode) {
                 current_mode = tick.mode;
-                SDL_SetWindowTitle(window, window_title(current_mode, debug_view).c_str());
+                SDL_SetWindowTitle(window, window_title(current_mode, debug_view, sim_hz).c_str());
             }
             current_scene = tick.render_scene;
             next_tick += timestep;

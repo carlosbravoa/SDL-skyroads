@@ -159,7 +159,10 @@ void Ship::update_y_velocity(const Ship& expected, const Level& level,
                 if (y_velocity < 0.0) {
                     events.push_back(GameplayEvent::ShipBounced);
                 }
-                y_velocity = -0.5 * y_velocity;
+                // EXE (@0x2485): bounce = -(y_vel_raw * 5) / 10 on the raw 1/128
+                // fixed-point value, with integer truncation -- not float -0.5*v.
+                const long raw = std::lround(y_velocity * 128.0);
+                y_velocity = static_cast<double>(-(raw * 5) / 10) / 128.0;
             } else {
                 y_velocity = 0.0;
             }
@@ -207,11 +210,14 @@ void Ship::update_jump_o_master(ControllerState controls, const Level& level) {
 }
 
 void Ship::update_gravity(double gravity_acceleration) {
-    if (y_position >= 0x28) {
+    // EXE (@0x25c9): threshold is y >= 0x2800 (raw) = GROUND_Y (80.0); the port
+    // had 0x28 (40.0), a dropped-digit transcription. Terminal fall velocity is
+    // -106 (0xff96), not -105.
+    if (y_position >= GROUND_Y) {
         y_velocity += gravity_acceleration;
         y_velocity = s_floor(y_velocity * 128.0) / 128.0;
-    } else if (y_velocity > -(105.0 / 128.0)) {
-        y_velocity = -(105.0 / 128.0);
+    } else if (y_velocity > -(106.0 / 128.0)) {
+        y_velocity = -(106.0 / 128.0);
     }
 }
 

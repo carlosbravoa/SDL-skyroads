@@ -157,22 +157,24 @@ uint8_t nonzero_or(uint8_t value, uint8_t fallback) {
     return value == 0 ? fallback : value;
 }
 
+// Current road's VGA palette for the frame being drawn (set in
+// render_play_scene). The DOS road renderer colours each TREKDAT span by
+// indexing this palette with the shape's colour code, which yields the exact
+// road greys and wall pinks. Single-threaded renderer, so a file-local is safe.
+const std::vector<RgbColor>* g_road_palette = nullptr;
+
 RgbColor dos_shape_color(LevelCell cell, uint8_t color_code) {
+    if (g_road_palette != nullptr && color_code < g_road_palette->size()) {
+        return (*g_road_palette)[color_code];
+    }
+    // Fallback (no palette available): approximate from the tile's base colour.
     const RgbColor base = road_color(cell);
     if (color_code >= 0x01 && color_code <= 0x0E) {
         return scale_brightness(base, 0.98f + static_cast<float>(color_code & 0x0F) * 0.02f);
     }
     if (color_code >= 0x0F && color_code <= 0x1D) return scale_brightness(base, 1.18f);
     if (color_code >= 0x1E && color_code <= 0x2D) return scale_brightness(base, 0.78f);
-    switch (color_code) {
-        case 0x3D: return scale_brightness(base, 0.58f);
-        case 0x41: return scale_brightness(base, 0.90f);
-        case 0x43: return scale_brightness(base, 0.68f);
-        case 62: return scale_brightness(base, 0.72f);
-        case 63: return scale_brightness(base, 0.62f);
-        case 68: return scale_brightness(base, 1.28f);
-        default: return scale_brightness(base, 0.92f);
-    }
+    return scale_brightness(base, 0.92f);
 }
 
 void draw_trekdat_span(FrameBuffer320x200& frame, int32_t x, int32_t y,
@@ -455,10 +457,18 @@ DerivedShipVisualState derive_ship_visual_state(const DemoPlaybackState& scene) 
         explosion_frame = sat_sub(scene.frame_index, *scene.ship.death_frame_index) / 3;
     }
 
+    // Exact DOS pose formula (re/NOTES.md, wrapper @0xbe3/0xc93):
+    //   sprite = (lane*3 + vstate)*3 + 14 + thrust ; our exact_ship_frames array
+    //   is based at sprite 14, so the array index drops the +14. thrust is the
+    //   engine-flicker animation (added later); 0 gives the static pose.
     std::optional<std::size_t> exact_ship_frame_index;
     if (scene.ship.state == ShipState::Alive) {
+        const int32_t v = std::clamp(vertical_state, 0, 2);
+        // Thrust flicker: table ds:0xea = {0,1,2,1}, cycled by (frame/2)%4.
+        static const int thrust_cycle[4] = {0, 1, 2, 1};
+        const int thrust = thrust_cycle[(scene.frame_index / 2) % 4];
         exact_ship_frame_index =
-            static_cast<std::size_t>((lane_index * 3 + vertical_state) * 3);
+            static_cast<std::size_t>((lane_index * 3 + v) * 3 + thrust);
     }
 
     DerivedShipVisualState v;
@@ -484,20 +494,24 @@ float projected_center_x(const DemoPlaybackState& scene, float depth, float far_
     return static_cast<float>(FRAMEBUFFER_WIDTH) / 2.0f - ship_bias * perspective;
 }
 
-// The track is drawn in a FIXED perspective (its vanishing point never moves).
-// The ship slides across it: its screen-X follows the ship's world-X, and its
-// tilt comes from the pre-rendered banked sprite selected by lane (see
-// derive_ship_visual_state). `ship_screen_bias_x` already encodes
-// (world_x - centre) * ~0.65 px/unit, which spans the road width at the ship's
-// screen depth. `scene`/`slices` are unused but kept for the shared signature
-// the debug paths call.
+// Exact DOS screen-X (re/NOTES.md, wrapper @0xe01 + blit @0x325c): the sprite's
+// left edge = x_position - 110 + lane_adj, a 1:1 world->screen mapping (1 px per
+// world unit, no compression, no clamp). Our sprite is 30 wide, so the centre is
+// (x_position - 110 + adj) + 15 = x_position - 95 + adj. This makes the ship's
+// visual position match the simulation exactly, so collisions line up and it can
+// travel the full lane range. `slices` unused; kept for the shared signature.
 ShipScreenPlacement ship_screen_placement_from_slices(
-    const DemoPlaybackState& /*scene*/, const DerivedShipVisualState& visual,
+    const DemoPlaybackState& scene, const DerivedShipVisualState& visual,
     const std::vector<ProjectedRoadSlice>& /*slices*/) {
+    static const int lane_adj[7] = {-1, -1, -1, 0, 1, 2, 4};
+    const int lane = std::clamp(
+        (static_cast<int>(std::floor(scene.ship.x_position)) - 95) / 46, 0, 6);
     const int32_t center_x =
-        std::clamp(SHIP_SCREEN_X + visual.ship_screen_bias_x, 8, 312);
+        static_cast<int32_t>(std::lround(scene.ship.x_position)) - 95 + lane_adj[lane];
     const int32_t shadow_center_y = SHIP_SCREEN_Y + 18;
-    const int32_t sprite_center_y = SHIP_SCREEN_Y + visual.vertical_offset_y;
+    // Sit the ship on the ground (its wheels/engines near the shadow) rather than
+    // hovering above it. On the ground vertical_offset_y is 0; a jump lifts it.
+    const int32_t sprite_center_y = SHIP_SCREEN_Y + 4 + visual.vertical_offset_y;
     return ShipScreenPlacement{center_x, sprite_center_y, center_x,
                                shadow_center_y};
 }
@@ -802,132 +816,25 @@ bool draw_dos_trekdat_pass(FrameBuffer320x200& frame, const DemoPlaybackState& s
 
 // ---- sprite atlas helpers --------------------------------------------------
 
-bool is_row_empty(const ImageFrame& frame, std::size_t row, std::size_t width) {
-    const std::size_t base = row * width;
-    for (std::size_t x = 0; x < width; ++x) {
-        if (frame.pixels[base + x] != 0) return false;
-    }
-    return true;
-}
-
-std::optional<std::pair<std::size_t, std::size_t>> sprite_x_bounds(
-    const ImageFrame& frame, std::size_t start_row, std::size_t end_row,
-    std::size_t width) {
-    std::size_t min_x = width;
-    std::size_t max_x = 0;
-    bool found = false;
-    for (std::size_t row = start_row; row < end_row; ++row) {
-        const std::size_t base = row * width;
-        for (std::size_t x = 0; x < width; ++x) {
-            if (frame.pixels[base + x] == 0) continue;
-            min_x = std::min(min_x, x);
-            max_x = std::max(max_x, x);
-            found = true;
-        }
-    }
-    if (!found) return std::nullopt;
-    return std::make_pair(min_x, max_x);
-}
-
-std::vector<ImageFrame> split_vertical_sprites(const ImageFrame& frame) {
-    const std::size_t width = frame.width;
-    const std::size_t height = frame.height;
-    std::vector<ImageFrame> segments;
-    std::size_t row = 0;
-    while (row < height) {
-        while (row < height && is_row_empty(frame, row, width)) row += 1;
-        if (row >= height) break;
-        const std::size_t start_row = row;
-        while (row < height && !is_row_empty(frame, row, width)) row += 1;
-        const std::size_t end_row = row;
-        auto bounds = sprite_x_bounds(frame, start_row, end_row, width);
-        if (!bounds) continue;
-        const std::size_t min_x = bounds->first;
-        const std::size_t max_x = bounds->second;
-        const std::size_t sprite_width = max_x - min_x + 1;
-        const std::size_t sprite_height = end_row - start_row;
-        Bytes pixels;
-        pixels.reserve(sprite_width * sprite_height);
-        for (std::size_t y = start_row; y < end_row; ++y) {
-            const std::size_t base = y * width;
-            pixels.insert(pixels.end(), frame.pixels.begin() + base + min_x,
-                          frame.pixels.begin() + base + max_x + 1);
-        }
-        ImageFrame seg;
-        seg.width = static_cast<uint16_t>(sprite_width);
-        seg.height = static_cast<uint16_t>(sprite_height);
-        seg.pixels = std::move(pixels);
-        seg.palette = frame.palette;
-        seg.transparent_zero = frame.transparent_zero;
-        segments.push_back(std::move(seg));
-    }
-    return segments;
-}
-
-ImageFrame rotate_sprite_cw(const ImageFrame& sprite) {
-    const std::size_t width = sprite.width;
-    const std::size_t height = sprite.height;
-    const std::size_t new_width = height;
-    const std::size_t new_height = width;
-    Bytes pixels(new_width * new_height, 0);
-    for (std::size_t y = 0; y < height; ++y) {
-        for (std::size_t x = 0; x < width; ++x) {
-            const uint8_t pixel = sprite.pixels[y * width + x];
-            const std::size_t dest_x = height - 1 - y;
-            const std::size_t dest_y = x;
-            pixels[dest_y * new_width + dest_x] = pixel;
-        }
-    }
+// The DOS blit reads the 24-wide sprite row-major and writes each row down a
+// screen column, i.e. sprite(row r, col c) -> screen(x = r, y = c). That is a
+// transpose (a 90deg rotation plus a horizontal flip), so the on-screen sprite
+// is `height` wide by `width` tall. Using a plain rotation instead mirrors the
+// ship and reverses its bank direction.
+ImageFrame transpose_sprite(const ImageFrame& sprite) {
+    const std::size_t width = sprite.width;   // 24 (columns)
+    const std::size_t height = sprite.height; // 30 (rows)
     ImageFrame out;
     out.offset = sprite.offset;
-    out.width = static_cast<uint16_t>(new_width);
-    out.height = static_cast<uint16_t>(new_height);
-    out.pixels = std::move(pixels);
+    out.width = static_cast<uint16_t>(height);
+    out.height = static_cast<uint16_t>(width);
     out.palette = sprite.palette;
     out.transparent_zero = sprite.transparent_zero;
-    return out;
-}
-
-ImageFrame trim_sprite(const ImageFrame& sprite) {
-    const std::size_t width = sprite.width;
-    const std::size_t height = sprite.height;
-    std::size_t min_x = width, min_y = height, max_x = 0, max_y = 0;
-    bool found = false;
-    for (std::size_t y = 0; y < height; ++y) {
-        for (std::size_t x = 0; x < width; ++x) {
-            if (sprite.pixels[y * width + x] == 0) continue;
-            min_x = std::min(min_x, x);
-            min_y = std::min(min_y, y);
-            max_x = std::max(max_x, x);
-            max_y = std::max(max_y, y);
-            found = true;
+    out.pixels.assign(width * height, 0);
+    for (std::size_t r = 0; r < height; ++r) {
+        for (std::size_t c = 0; c < width; ++c) {
+            out.pixels[c * height + r] = sprite.pixels[r * width + c];
         }
-    }
-    if (!found) return sprite;
-    const std::size_t tw = max_x - min_x + 1;
-    const std::size_t th = max_y - min_y + 1;
-    Bytes pixels;
-    pixels.reserve(tw * th);
-    for (std::size_t y = min_y; y <= max_y; ++y) {
-        const std::size_t base = y * width;
-        pixels.insert(pixels.end(), sprite.pixels.begin() + base + min_x,
-                      sprite.pixels.begin() + base + max_x + 1);
-    }
-    ImageFrame out;
-    out.offset = sprite.offset;
-    out.width = static_cast<uint16_t>(tw);
-    out.height = static_cast<uint16_t>(th);
-    out.pixels = std::move(pixels);
-    out.palette = sprite.palette;
-    out.transparent_zero = sprite.transparent_zero;
-    return out;
-}
-
-std::vector<ImageFrame> collect_sprite_group(const std::vector<ImageFrame>& sprites,
-                                             std::size_t start_index) {
-    std::vector<ImageFrame> out;
-    for (std::size_t i = start_index; i < start_index + 3; ++i) {
-        out.push_back(trim_sprite(rotate_sprite_cw(sprites[i])));
     }
     return out;
 }
@@ -1040,27 +947,48 @@ AttractModeAssets AttractModeAssets::load_from_root(const std::string& source_ro
     return a;
 }
 
+namespace {
+// The DOS renderer treats CARS as a flat array of fixed 24x30 (720-byte) sprites
+// indexed by pose number (block n = rows [n*30, n*30+30)). The old code split on
+// blank rows, which produced a different sprite count/boundaries and misaligned
+// every index. Extract fixed blocks to match the executable exactly.
+constexpr std::size_t CARS_W = 24;
+constexpr std::size_t CARS_H = 30;
+
+ImageFrame cars_block(const ImageFrame& sheet, std::size_t n) {
+    ImageFrame out;
+    out.width = static_cast<uint16_t>(CARS_W);
+    out.height = static_cast<uint16_t>(CARS_H);
+    out.palette = sheet.palette;
+    out.transparent_zero = sheet.transparent_zero;
+    out.pixels.resize(CARS_W * CARS_H, 0);
+    const std::size_t base = n * CARS_H * CARS_W;
+    for (std::size_t i = 0; i < CARS_W * CARS_H; ++i) {
+        if (base + i < sheet.pixels.size()) out.pixels[i] = sheet.pixels[base + i];
+    }
+    return out;
+}
+} // namespace
+
 std::optional<CarAtlas> CarAtlas::from_archive(const ImageArchive& archive) {
     if (archive.frames.empty() || archive.frames.front().empty()) return std::nullopt;
     const ImageFrame& frame = archive.frames.front().front();
-    const std::vector<ImageFrame> sprites = split_vertical_sprites(frame);
-    if (sprites.size() < 48) return std::nullopt;
+    if (frame.width != CARS_W) return std::nullopt;
+    const std::size_t block_count = frame.height / CARS_H; // 77 in the shipped set
+    if (block_count < 77) return std::nullopt;
 
     CarAtlas atlas;
-    for (std::size_t i = 0; i < 7; ++i) {
-        atlas.explosion_frames.push_back(trim_sprite(sprites[i]));
+    // Sprites 0..13 are the explosion/destroyed set (death pose = timer/3).
+    for (std::size_t i = 0; i < 14; ++i) {
+        atlas.explosion_frames.push_back(transpose_sprite(cars_block(frame, i)));
     }
-    for (std::size_t i = 14; i < 77; ++i) {
-        atlas.exact_ship_frames.push_back(trim_sprite(rotate_sprite_cw(sprites[i])));
+    // Sprites 14..76 are the flight poses: pose = (lane*3 + vstate)*3 + thrust,
+    // with this array based at sprite 14.
+    for (std::size_t i = 14; i < block_count; ++i) {
+        atlas.exact_ship_frames.push_back(transpose_sprite(cars_block(frame, i)));
     }
-    atlas.alive_left = collect_sprite_group(sprites, 21);
-    atlas.alive_center = collect_sprite_group(sprites, 27);
-    atlas.alive_right = collect_sprite_group(sprites, 30);
-    atlas.jump_left = collect_sprite_group(sprites, 36);
-    atlas.jump_center = collect_sprite_group(sprites, 42);
-    atlas.jump_right = collect_sprite_group(sprites, 45);
-    if (atlas.alive_center.empty()) return std::nullopt;
-    atlas.destroyed = atlas.alive_center.front();
+    if (atlas.exact_ship_frames.empty()) return std::nullopt;
+    atlas.destroyed = atlas.explosion_frames.back();
     return atlas;
 }
 
@@ -1075,20 +1003,11 @@ const ImageFrame& CarAtlas::select_sprite(const DerivedShipVisualState& visual,
         case ShipSpriteKind::Destroyed:
             return destroyed;
         case ShipSpriteKind::Alive: {
-            if (visual.exact_ship_frame_index &&
-                *visual.exact_ship_frame_index < exact_ship_frames.size()) {
-                return exact_ship_frames[*visual.exact_ship_frame_index];
-            }
-            const std::vector<ImageFrame>* bank_frames;
-            if (visual.jumping && visual.bank == ShipBank::Left) bank_frames = &jump_left;
-            else if (visual.jumping && visual.bank == ShipBank::Right) bank_frames = &jump_right;
-            else if (visual.jumping) bank_frames = &jump_center;
-            else if (visual.bank == ShipBank::Left) bank_frames = &alive_left;
-            else if (visual.bank == ShipBank::Right) bank_frames = &alive_right;
-            else bank_frames = &alive_center;
-            const std::size_t denom = std::max<std::size_t>(bank_frames->size(), 1);
-            const std::size_t phase = visual.thrust_on ? (frame_index / 4) % denom : 0;
-            return (*bank_frames)[std::min(phase, sat_sub(bank_frames->size(), 1))];
+            (void)frame_index;
+            std::size_t index =
+                visual.exact_ship_frame_index ? *visual.exact_ship_frame_index : 0;
+            index = std::min(index, sat_sub(exact_ship_frames.size(), 1));
+            return exact_ship_frames[index];
         }
     }
     return destroyed;
@@ -1196,26 +1115,34 @@ void ReferenceRenderer::render_settings_menu(FrameBuffer320x200& frame,
 
 void ReferenceRenderer::render_go_menu(FrameBuffer320x200& frame,
                                        const GoMenuScene& scene) const {
+    // Frame 0 of GOMENU is the full stage-selector grid (10 worlds x 3 roads,
+    // names and planet thumbnails baked in). We just overlay a cursor on the
+    // selected entry. Grid geometry measured from the art: two columns
+    // (worlds 0-4 left, 5-9 right), rows step 39px, roads step 9px, first road
+    // text at y=13; road text spans x59-92 (left) / x219-252 (right).
     frame.clear(RgbColor(0, 0, 0));
     draw_archive_frame(frame, assets_.go_menu, 0, 1.0f, 1.0f);
 
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "WORLD %zu OF %zu", scene.selected_world + 1,
-                  scene.world_count);
-    draw_text_centered(frame, buf, 96, RgbColor(244, 233, 146), 2);
-    std::snprintf(buf, sizeof(buf), "LEVEL %zu", scene.selected_level + 1);
-    draw_text_centered(frame, buf, 116, RgbColor(190, 220, 255), 2);
-    std::snprintf(buf, sizeof(buf), "FUEL %u  OXY %u", scene.fuel, scene.oxygen);
-    draw_text_centered(frame, buf, 136, RgbColor(150, 200, 170), 1);
-    draw_text_centered(frame, "ARROWS SELECT", 156, RgbColor(180, 180, 200), 1);
-    draw_text_centered(frame, "ENTER LAUNCH   ESC BACK", 168,
-                       RgbColor(180, 180, 200), 1);
+    const std::size_t world = scene.selected_world;
+    const bool right_col = world >= 5;
+    const int row = static_cast<int>(world % 5);
+    const int road = static_cast<int>(scene.selected_level);
+    const int text_x0 = right_col ? 219 : 59;
+    const int text_x1 = right_col ? 252 : 92;
+    const int text_y = 13 + row * 39 + road * 9;
+
+    // White outline box around the selected "Road N", plus an orange marker dot.
+    stroke_rect(frame, text_x0 - 3, text_y - 2, (text_x1 - text_x0) + 6, 9,
+                RgbColor(232, 232, 245));
+    frame.fill_rect(text_x1 + 6, text_y + 1, 4, 4, RgbColor(240, 150, 60));
 }
 
 void ReferenceRenderer::render_play_scene(FrameBuffer320x200& frame,
                                           const DemoPlaybackState& scene) const {
     const DerivedShipVisualState ship_visual = derive_ship_visual_state(scene);
     const ShipScreenPlacement ship_placement = ship_screen_placement(scene, ship_visual);
+    g_road_palette =
+        scene.road_palette.empty() ? nullptr : &scene.road_palette;
     frame.clear(RgbColor(0, 0, 0));
     const ImageArchive* world = nullptr;
     if (scene.world_index < assets_.worlds.size()) world = &assets_.worlds[scene.world_index];
@@ -1445,7 +1372,9 @@ void ReferenceRenderer::draw_projected_slice(FrameBuffer320x200& frame,
 void ReferenceRenderer::draw_ship_shadow(FrameBuffer320x200& frame,
                                          const DerivedShipVisualState& visual,
                                          ShipScreenPlacement placement) const {
-    if (!visual.on_surface || visual.sprite_kind != ShipSpriteKind::Alive) return;
+    // Draw the ground shadow whenever alive (including mid-jump) — the original
+    // keeps it on the ground below the ship. It shrinks with height via `hover`.
+    if (visual.sprite_kind != ShipSpriteKind::Alive) return;
     const int32_t shadow_center_x = placement.shadow_center_x;
     const int32_t shadow_center_y = placement.shadow_center_y;
     const int32_t hover = std::max(-visual.vertical_offset_y, 0);

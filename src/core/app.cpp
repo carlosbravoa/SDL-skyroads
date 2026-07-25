@@ -45,9 +45,12 @@ void emit_sfx_for_events(const std::vector<GameplayEvent>& events,
     for (GameplayEvent event : events) {
         std::optional<uint8_t> sfx;
         switch (event) {
+            // SFX indices verified from the executable (player @0x3c2): bump=0,
+            // bounce=1 (the heavy machine thud), explode=2, refill=4. The port
+            // previously used bounce=3 (a short beep) and explode=1.
             case GameplayEvent::ShipBumpedWall: sfx = 0; break;
-            case GameplayEvent::ShipExploded: sfx = 1; break;
-            case GameplayEvent::ShipBounced: sfx = 3; break;
+            case GameplayEvent::ShipExploded: sfx = 2; break;
+            case GameplayEvent::ShipBounced: sfx = 1; break;
             case GameplayEvent::ShipRefilled: sfx = 4; break;
         }
         if (sfx) {
@@ -246,11 +249,29 @@ void AttractModeApp::tick_go_menu(AppInput input, std::vector<AudioCommand>& aud
         enter_main_menu(audio);
         return;
     }
+    // The GOMENU grid is two columns (worlds 0-4 left, 5-9 right), each world a
+    // row of 3 roads. Left/Right switch column; Up/Down move road, spilling into
+    // the adjacent world in the same column.
     const std::size_t worlds = world_count();
-    if (input.left && selected_world_ > 0) selected_world_ -= 1;
-    if (input.right && selected_world_ + 1 < worlds) selected_world_ += 1;
-    if (input.up && selected_level_ > 0) selected_level_ -= 1;
-    if (input.down && selected_level_ < 2) selected_level_ += 1;
+    const std::size_t row = selected_world_ % 5;
+    if (input.left && selected_world_ >= 5) selected_world_ -= 5;
+    if (input.right && selected_world_ + 5 < worlds) selected_world_ += 5;
+    if (input.up) {
+        if (selected_level_ > 0) {
+            selected_level_ -= 1;
+        } else if (row > 0) {
+            selected_world_ -= 1; // previous world in this column
+            selected_level_ = 2;
+        }
+    }
+    if (input.down) {
+        if (selected_level_ < 2) {
+            selected_level_ += 1;
+        } else if (row < 4 && selected_world_ + 1 < worlds) {
+            selected_world_ += 1; // next world in this column
+            selected_level_ = 0;
+        }
+    }
 
     if (input.enter) {
         current_level_index_ = selected_road_index();
@@ -516,6 +537,7 @@ DemoPlaybackState AttractModeApp::build_play_scene(const GameplaySession& sessio
         session.ship.jump_o_master_in_use,
         session.ship.jump_o_master_velocity_delta};
     state.ship = build_ship_render_state(session);
+    state.road_palette = session.level.palette;
     return state;
 }
 

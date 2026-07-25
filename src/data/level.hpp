@@ -1,8 +1,7 @@
 // Part of the SkyRoads SDL port
 //
 // Level geometry plus the DOS collision probes. The physics constants are kept
-// as exact `hex / 0x80` fixed-point ratios in double precision, matching the
-// the reference design reference literal-for-literal.
+// as exact `hex / 0x80` fixed-point ratios in double precision.
 #pragma once
 
 #include <array>
@@ -11,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "data/image.hpp"
 #include "data/roads.hpp"
 
 namespace skyroads::data {
@@ -64,6 +64,9 @@ struct Level {
     uint16_t fuel = 0;
     uint16_t oxygen = 0;
     std::vector<LevelRow> cells;
+    // The road's 72-entry VGA palette (already scaled 6-bit -> 8-bit). The DOS
+    // road renderer indexes this by TREKDAT colour code for exact road/wall hues.
+    std::vector<RgbColor> palette;
 
     std::size_t width() const { return ROAD_COLUMNS; }
     std::size_t length() const { return cells.size(); }

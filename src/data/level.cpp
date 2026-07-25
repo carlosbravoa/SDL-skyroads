@@ -188,6 +188,18 @@ Level level_from_road_entry(const RoadEntry& road) {
     level.gravity = road.gravity;
     level.fuel = road.fuel;
     level.oxygen = road.oxygen;
+    // Scale the road's 6-bit VGA palette to 8-bit (saturating x4).
+    const std::size_t color_count = road.palette_vga.size() / 3;
+    level.palette.reserve(color_count);
+    for (std::size_t i = 0; i < color_count; ++i) {
+        auto up = [](uint8_t v) -> uint8_t {
+            const unsigned s = static_cast<unsigned>(v) * 4u;
+            return s > 255u ? 255u : static_cast<uint8_t>(s);
+        };
+        level.palette.push_back(RgbColor(up(road.palette_vga[i * 3]),
+                                         up(road.palette_vga[i * 3 + 1]),
+                                         up(road.palette_vga[i * 3 + 2])));
+    }
     level.cells.reserve(road.rows.size());
     for (const RoadRow& row : road.rows) {
         LevelRow cells;

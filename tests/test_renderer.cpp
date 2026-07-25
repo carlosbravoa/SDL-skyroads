@@ -38,9 +38,11 @@ static void test_car_atlas() {
     AttractModeAssets a = load_assets();
     auto atlas = CarAtlas::from_archive(a.cars);
     CHECK_TRUE(atlas.has_value());
-    CHECK_EQ(atlas->explosion_frames.size(), static_cast<std::size_t>(7));
-    CHECK_EQ(atlas->alive_center.size(), static_cast<std::size_t>(3));
-    CHECK_TRUE(atlas->alive_center[0].width > atlas->alive_center[0].height);
+    // Fixed 24x30-block extraction: 14 explosion sprites (0..13) and 63 flight
+    // poses (14..76), each rotated to landscape (30 wide x 24 tall).
+    CHECK_EQ(atlas->explosion_frames.size(), static_cast<std::size_t>(14));
+    CHECK_EQ(atlas->exact_ship_frames.size(), static_cast<std::size_t>(63));
+    CHECK_TRUE(atlas->exact_ship_frames[27].width > atlas->exact_ship_frames[27].height);
 }
 
 static void test_intro_menu_non_empty() {

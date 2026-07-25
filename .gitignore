@@ -1,0 +1,18 @@
+/build/
+*.o
+*.obj
+
+# Local-only agent notes — must never be committed
+/CLAUDE.md
+
+# Original game data files — freeware, but not ours to redistribute.
+# Users download them from the creators (see README). Kept local only.
+/skyroads-assets/
+/skyroads-assets-backup/
+
+# Reverse-engineering workspace (derived from the copyrighted EXE) — local only
+/re/
+
+# Original-game screenshots (captures of the copyrighted original) — local only
+/screenshots/og1.png
+/screenshots/og2.png
