@@ -11,7 +11,7 @@ namespace {
 
 constexpr float MUSIC_TICK_SECONDS = 0.005f;
 constexpr float INTRO_GAIN = 0.40f;
-constexpr float MUSIC_GAIN = 0.32f;
+constexpr float MUSIC_GAIN = 0.90f; // real OPL2 output level; was tuned for the old approximation
 constexpr float MIN_DB = -96.0f;
 constexpr float MAX_DB = 0.0f;
 constexpr float PI = 3.14159265358979323846f;
@@ -215,100 +215,150 @@ WaveType wave_type_from_u8(uint8_t value) {
 
 // ---- OplSynth --------------------------------------------------------------
 
+// ---- OplSynth: SkyRoads' AdLib driver on an emulated YM3812 ------------------
+//
+// Every table here is lifted from the driver in SKYROADS.EXE:
+//   ds:0xc1c  register group per instrument byte (2 operators of 5, then 0xC0)
+//   ds:0xc27  operator-1 slot offset per voice
+//   ds:0xc32  operator-2 slot offset per voice (0xFF = single-operator percussion)
+//   ds:0xc3d  channel number per voice for 0xA0/0xB0/0xC0 (0xFF = none)
+//   ds:0xc48  volume -> extra attenuation added to the instrument's total level
+namespace {
+
+// 20 40 60 80 E0 | 20 40 60 80 E0 | C0
+const std::array<uint8_t, 11> OPL_REG_GROUP = {0x20, 0x40, 0x60, 0x80, 0xE0,
+                                               0x20, 0x40, 0x60, 0x80, 0xE0, 0xC0};
+const std::array<uint8_t, 11> OPL_OP1_SLOT = {0x00, 0x01, 0x02, 0x08, 0x09, 0x0A,
+                                              0x10, 0x14, 0x12, 0x15, 0x11};
+const std::array<uint8_t, 11> OPL_OP2_SLOT = {0x03, 0x04, 0x05, 0x0B, 0x0C, 0x0D,
+                                              0x13, 0xFF, 0xFF, 0xFF, 0xFF};
+const std::array<uint8_t, 11> OPL_CHANNEL = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+                                             0x06, 0x07, 0xFF, 0x08, 0xFF};
+// Attenuation added to an instrument's total level, indexed by the song's volume.
+const std::array<uint8_t, 30> OPL_VOLUME_ATTEN = {
+    0x3F, 0x14, 0x10, 0x0E, 0x0C, 0x0A, 0x09, 0x08, 0x07, 0x06,
+    0x06, 0x05, 0x05, 0x04, 0x04, 0x04, 0x04, 0x04, 0x03, 0x03,
+    0x03, 0x03, 0x02, 0x02, 0x02, 0x01, 0x01, 0x01, 0x01, 0x00};
+
+} // namespace
+
 OplSynth::OplSynth(float sample_rate)
-    : sample_rate_(sample_rate), time_(0.0f), channels_(15) {
-    for (auto& row : waves_) row.fill(0.0f);
-    for (std::size_t index = 0; index < SAMPLE_COUNT_WAVE; ++index) {
-        const float angle =
-            2.0f * PI * static_cast<float>(index) / static_cast<float>(SAMPLE_COUNT_WAVE);
-        const float sine = std::sin(angle);
-        waves_[static_cast<std::size_t>(WaveType::Sine)][index] = sine;
-        waves_[static_cast<std::size_t>(WaveType::HalfSine)][index] = std::max(sine, 0.0f);
-        waves_[static_cast<std::size_t>(WaveType::AbsSign)][index] = std::fabs(sine);
-        waves_[static_cast<std::size_t>(WaveType::PulseSign)][index] =
-            std::fmod(angle, 6.28f) < 1.57f ? sine : 0.0f;
-        waves_[static_cast<std::size_t>(WaveType::SineEven)][index] =
-            std::fmod(angle, 12.56f) < 6.28f ? sine : 0.0f;
-        waves_[static_cast<std::size_t>(WaveType::AbsSineEven)][index] =
-            std::fmod(angle, 12.56f) < 6.28f ? std::fabs(sine) : 0.0f;
-        waves_[static_cast<std::size_t>(WaveType::Square)][index] = sine > 0.0f ? 1.0f : 0.0f;
-        waves_[static_cast<std::size_t>(WaveType::DerivedSquare)][index] =
-            sine > 0.0f ? 1.0f : 0.0f;
-    }
+    : chip_(static_cast<uint32_t>(sample_rate <= 0.0f ? 48000.0f : sample_rate)) {
+    voice_has_instrument_.fill(false);
+    voice_volume_.fill(static_cast<uint8_t>(OPL_VOLUME_ATTEN.size() - 1));
+    init_chip();
+}
+
+void OplSynth::write_reg(uint8_t reg, uint8_t value) { chip_.write(reg, value); }
+
+// Driver init @0x58b1: silence every total-level register, enable wave select
+// (an OPL2 feature, reg 0x01 = 0x20), clear 0x08, then set AM depth + vibrato
+// depth + rhythm mode in 0xBD.
+void OplSynth::init_chip() {
+    chip_.reset();
+    for (uint8_t reg = 0x40; reg <= 0x55; ++reg) write_reg(reg, 0x3F);
+    write_reg(0x01, 0x20);
+    write_reg(0x08, 0x00);
+    rhythm_reg_ = 0xE0;
+    write_reg(0xBD, rhythm_reg_);
 }
 
 void OplSynth::stop_all() {
-    for (auto& channel : channels_) {
-        channel.a.state = KeyState::Off;
-        channel.b.state = KeyState::Off;
-    }
+    for (std::size_t voice = 0; voice < OPL_VOICES; ++voice) stop_note(voice);
+    init_chip();
+    voice_has_instrument_.fill(false);
 }
 
+// Instrument load @0x58fd: five registers for operator 1, five for operator 2
+// (skipped entirely on the single-operator percussion voices), then 0xC0.
 void OplSynth::set_channel_config(std::size_t channel_index,
                                   const MuzaxInstrument& instrument) {
-    if (channel_index >= channels_.size()) return;
-    Channel& channel = channels_[channel_index];
-    channel.a.config = osc_desc_from_instrument(
-        instrument.operator_a, wave_type_from_u8(instrument.operator_a.wave_form));
-    channel.b.config = osc_desc_from_instrument(
-        instrument.operator_b, wave_type_from_u8(instrument.operator_b.wave_form));
-    channel.additive = (instrument.channel_config & 1) != 0;
-    channel.feedback = static_cast<std::size_t>((instrument.channel_config & 0x0E) >> 1);
-    channel.feedback_factor =
-        channel.feedback > 0 ? std::pow(2.0f, static_cast<float>(channel.feedback) + 8.0f)
-                             : 0.0f;
-    const float radians_per_wave = 2.0f * PI;
-    const float dbu_per_wave = 1024.0f * 16.0f;
-    const float vol_as_dbu = 1.0f * 0x4000 * 0x10000 / 0x4000;
-    channel.m2 = radians_per_wave * vol_as_dbu / dbu_per_wave;
-    channel.m1 = channel.m2 / 2.0f / 0x10000;
+    if (channel_index >= OPL_VOICES) return;
+    std::array<uint8_t, 11> bytes{};
+    for (std::size_t i = 0; i < bytes.size(); ++i) bytes[i] = instrument.raw[i];
+    voice_instrument_[channel_index] = bytes;
+    voice_has_instrument_[channel_index] = true;
+
+    const uint8_t op1 = OPL_OP1_SLOT[channel_index];
+    for (std::size_t i = 0; i < 5; ++i) {
+        write_reg(static_cast<uint8_t>(OPL_REG_GROUP[i] + op1), bytes[i]);
+    }
+    const uint8_t op2 = OPL_OP2_SLOT[channel_index];
+    if (op2 != 0xFF) {
+        for (std::size_t i = 5; i < 10; ++i) {
+            write_reg(static_cast<uint8_t>(OPL_REG_GROUP[i] + op2), bytes[i]);
+        }
+    }
+    const uint8_t channel = OPL_CHANNEL[channel_index];
+    if (channel != 0xFF) {
+        write_reg(static_cast<uint8_t>(0xC0 + channel), bytes[10]);
+    }
+    apply_volume(channel_index);
 }
 
-void OplSynth::set_channel_volume(std::size_t channel_index, float volume) {
-    if (channel_index >= channels_.size()) return;
-    channels_[channel_index].b.config.output_level = volume;
+// Volume @0x59f1/@0x59d3: keep the instrument's key-scale-level bits, add the
+// volume table's attenuation to its total level and clamp at maximum attenuation.
+void OplSynth::apply_volume(std::size_t channel_index) {
+    if (channel_index >= OPL_VOICES || !voice_has_instrument_[channel_index]) return;
+    const auto& bytes = voice_instrument_[channel_index];
+    const uint8_t volume = voice_volume_[channel_index];
+    const uint8_t atten =
+        OPL_VOLUME_ATTEN[std::min<std::size_t>(volume, OPL_VOLUME_ATTEN.size() - 1)];
+
+    const uint8_t op2 = OPL_OP2_SLOT[channel_index];
+    // Two-operator voices scale the carrier (operator 2); the single-operator
+    // percussion voices scale their only operator instead.
+    const bool two_op = op2 != 0xFF;
+    const uint8_t source = two_op ? bytes[6] : bytes[1];
+    const uint8_t slot = two_op ? op2 : OPL_OP1_SLOT[channel_index];
+    const uint8_t ksl = static_cast<uint8_t>(source & 0xC0);
+    uint16_t level = static_cast<uint16_t>(source & 0x3F) + atten;
+    if (level > 0x3F) level = 0x3F;
+    write_reg(static_cast<uint8_t>(0x40 + slot),
+              static_cast<uint8_t>(ksl | static_cast<uint8_t>(level)));
 }
 
+void OplSynth::set_channel_volume(std::size_t channel_index, uint8_t volume) {
+    if (channel_index >= OPL_VOICES) return;
+    voice_volume_[channel_index] = volume;
+    apply_volume(channel_index);
+}
+
+// Note on @0x5955: write the frequency number and block, then key on. Voices 0..5
+// key on with bit 0x20 of 0xB0; the rhythm voices instead set their bit in 0xBD.
 void OplSynth::start_note(std::size_t channel_index, uint16_t freq_num,
                           uint8_t block_num) {
-    if (channel_index >= channels_.size()) return;
-    Channel& channel = channels_[channel_index];
-    configure_osc_start(channel.a, channel.freq_num, channel.block_num, freq_num, block_num);
-    configure_osc_start(channel.b, channel.freq_num, channel.block_num, freq_num, block_num);
-    channel.freq_num = freq_num;
-    channel.block_num = block_num;
+    if (channel_index >= OPL_VOICES) return;
+    const uint8_t channel = OPL_CHANNEL[channel_index];
+    if (channel != 0xFF) {
+        write_reg(static_cast<uint8_t>(0xA0 + channel),
+                  static_cast<uint8_t>(freq_num & 0xFF));
+        uint8_t high = static_cast<uint8_t>(((freq_num >> 8) & 0x03) |
+                                            static_cast<uint8_t>((block_num & 0x07) << 2));
+        if (channel_index < 6) high |= 0x20; // key on
+        write_reg(static_cast<uint8_t>(0xB0 + channel), high);
+    }
+    if (channel_index >= 6) {
+        rhythm_reg_ = static_cast<uint8_t>(
+            rhythm_reg_ | static_cast<uint8_t>(0x10 >> (channel_index - 6)));
+        write_reg(0xBD, rhythm_reg_);
+    }
 }
 
+// Key off @0x59b3: melodic voices clear 0xB0 outright, rhythm voices clear their
+// bit in 0xBD.
 void OplSynth::stop_note(std::size_t channel_index) {
-    if (channel_index >= channels_.size()) return;
-    Channel& channel = channels_[channel_index];
-    for (OscState* osc : {&channel.a, &channel.b}) {
-        if (osc->state != KeyState::Off) osc->state = KeyState::Release;
+    if (channel_index >= OPL_VOICES) return;
+    if (channel_index < 6) {
+        write_reg(static_cast<uint8_t>(0xB0 + OPL_CHANNEL[channel_index]), 0x00);
+        return;
     }
+    rhythm_reg_ = static_cast<uint8_t>(
+        rhythm_reg_ & static_cast<uint8_t>(~(0x10 >> (channel_index - 6))));
+    write_reg(0xBD, rhythm_reg_);
 }
 
-float OplSynth::next_sample() {
-    time_ += 1.0f / sample_rate_;
-    float out = 0.0f;
-    for (std::size_t i = 0; i < channels_.size(); ++i) {
-        out += process_channel(i);
-    }
-    return std::clamp(out / 2.0f, -1.0f, 1.0f);
-}
-
-float OplSynth::process_channel(std::size_t channel_index) {
-    Channel& channel = channels_[channel_index];
-    const float feedback_mod =
-        (channel.output_0 + channel.output_1) * channel.feedback_factor * channel.m1;
-    const float a = process_osc(sample_rate_, time_, waves_, channel.a,
-                                channel.freq_num, channel.block_num, feedback_mod);
-    const float b = process_osc(sample_rate_, time_, waves_, channel.b,
-                                channel.freq_num, channel.block_num,
-                                channel.additive ? 0.0f : a * channel.m2);
-    channel.output_1 = channel.output_0;
-    channel.output_0 = a;
-    return channel.additive ? a + b : b;
-}
+float OplSynth::next_sample() { return chip_.next_sample(); }
 
 // ---- ActivePcm -------------------------------------------------------------
 
@@ -403,8 +453,9 @@ void MuzaxPlayer::read_note(OplSynth& synth) {
                 stop_note(cmd_low, synth);
                 break;
             case 4:
-                synth.set_channel_volume(
-                    cmd_low, static_cast<float>(cmd_high & 0x3F) / 0x3F * -47.25f);
+                // The driver uses the command's volume byte directly as an index
+                // into its attenuation table (@0x59f1 -> ds:0xc48), not as a level.
+                synth.set_channel_volume(cmd_low, cmd_high);
                 break;
             case 5:
                 cursor_ = std::min(jump_pos_, commands_.size());

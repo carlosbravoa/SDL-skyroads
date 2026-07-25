@@ -45,11 +45,23 @@ add_library(skyroads_renderer
 )
 target_link_libraries(skyroads_renderer PUBLIC skyroads_core skyroads_data)
 
-# ---- audio library: reference synth + mixer --------------------------
+# ---- ymfm: emulation of the YM3812 (OPL2) the game drives ------------------
+# Vendored subset of https://github.com/aaronsgiles/ymfm (BSD-3-Clause).
+add_library(ymfm STATIC
+  third_party/ymfm/ymfm_opl.cpp
+  third_party/ymfm/ymfm_adpcm.cpp
+  third_party/ymfm/ymfm_pcm.cpp
+)
+target_include_directories(ymfm PUBLIC third_party/ymfm)
+# Upstream code, not ours to lint.
+target_compile_options(ymfm PRIVATE -w)
+
+# ---- audio library: the game's OPL2 driver + mixer -------------------------
 add_library(skyroads_audio
   src/audio/audio.cpp
+  src/audio/opl_chip.cpp
 )
-target_link_libraries(skyroads_audio PUBLIC skyroads_core skyroads_data)
+target_link_libraries(skyroads_audio PUBLIC skyroads_core skyroads_data PRIVATE ymfm)
 
 # ---- tests -----------------------------------------------------------------
 enable_testing()

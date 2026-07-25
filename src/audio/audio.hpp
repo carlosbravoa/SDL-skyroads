@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "core/app.hpp"
+#include "audio/opl_chip.hpp"
 #include "data/muzax.hpp"
 #include "data/sound.hpp"
 
@@ -101,24 +102,39 @@ struct Channel {
     float m2 = 0.0f;
 };
 
+// SkyRoads' AdLib driver, reproduced from the EXE (register primitive @0x5876,
+// instrument load @0x58fd, note on @0x5955, key off @0x59b3, volume @0x59f1) and
+// driving a real emulated YM3812. The game has eleven voices: six melodic plus the
+// five OPL rhythm voices, which is why voices 6..10 key on through register 0xBD
+// rather than 0xB0.
+constexpr std::size_t OPL_VOICES = 11;
+
 class OplSynth {
 public:
     explicit OplSynth(float sample_rate);
     void stop_all();
     void set_channel_config(std::size_t channel_index,
                             const MuzaxInstrument& instrument);
-    void set_channel_volume(std::size_t channel_index, float volume);
+    // Raw volume byte from the song, used directly as an attenuation-table index.
+    void set_channel_volume(std::size_t channel_index, uint8_t volume);
     void start_note(std::size_t channel_index, uint16_t freq_num, uint8_t block_num);
     void stop_note(std::size_t channel_index);
     float next_sample();
 
 private:
-    float process_channel(std::size_t channel_index);
+    void init_chip();
+    void write_reg(uint8_t reg, uint8_t value);
+    void apply_volume(std::size_t channel_index);
 
-    float sample_rate_;
-    float time_;
-    std::array<std::array<float, SAMPLE_COUNT_WAVE>, 8> waves_;
-    std::vector<Channel> channels_;
+    OplChip chip_;
+    // Mirror of register 0xBD (AM depth, vibrato depth, rhythm enable and the five
+    // rhythm key-on bits): the driver read-modify-writes it, so we must too.
+    uint8_t rhythm_reg_ = 0xE0;
+    // Instrument bytes last loaded per voice, needed to recompute total level when
+    // the volume changes -- the driver re-reads its instrument table for that.
+    std::array<std::array<uint8_t, 11>, OPL_VOICES> voice_instrument_{};
+    std::array<bool, OPL_VOICES> voice_has_instrument_{};
+    std::array<uint8_t, OPL_VOICES> voice_volume_{};
 };
 
 struct ActivePcm {
