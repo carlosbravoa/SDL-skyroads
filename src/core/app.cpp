@@ -8,7 +8,12 @@
 namespace skyroads::core {
 namespace {
 
-constexpr std::size_t TICKS_PER_SECOND = 70;
+// The game's tick is the timer ISR's: PIT divisor 0x19E4 = 180.02 Hz, and the tick
+// counter ds:0x160c is bumped on 2 of every 10 interrupts (@0x3b06-0x3b14) = 36 Hz.
+// These intro timings are expressed in ticks, so they must use that rate; at the old
+// value of 70 the whole intro ran for about 77 seconds instead of 39, which is why
+// the main menu (and its music) seemed never to arrive.
+constexpr std::size_t TICKS_PER_SECOND = 36;
 constexpr std::size_t INTRO_SOUND_DELAY_TICKS = TICKS_PER_SECOND / 2;
 constexpr std::size_t INTRO_ANIM_START_TICKS = TICKS_PER_SECOND * 2;
 constexpr std::size_t INTRO_TITLE_HOLD_TICKS = TICKS_PER_SECOND * 4;

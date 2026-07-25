@@ -230,13 +230,15 @@ static void test_app_intro(const RoadsArchive& roads, const DemoRecording& demo)
 static void test_app_skip_intro(const RoadsArchive& roads,
                                 const DemoRecording& demo) {
     AttractModeApp app = make_app(roads, demo);
+    // The intro sample fires half a second in (18 ticks at the game's 36Hz), so by
+    // the time the intro is skipped it has already been emitted and only the menu
+    // song is left for that tick.
     for (int i = 0; i < 35; ++i) app.tick(AppInput{});
     AppTickResult tick = app.tick(key(&AppInput::space));
     CHECK_TRUE(tick.mode == AppMode::MainMenu);
     CHECK_TRUE(tick.render_scene.tag == RenderScene::Tag::MainMenu);
     CHECK_EQ(tick.audio_commands,
-             (std::vector<AudioCommand>{AudioCommand::play_intro_sample(),
-                                        AudioCommand::play_song(1)}));
+             (std::vector<AudioCommand>{AudioCommand::play_song(1)}));
 }
 
 static void test_app_idle_demo(const RoadsArchive& roads,
