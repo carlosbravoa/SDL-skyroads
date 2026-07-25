@@ -16,14 +16,22 @@ constexpr std::size_t CREDIT_FRAME_TICKS = TICKS_PER_SECOND * 4;
 constexpr std::size_t MENU_IDLE_DEMO_TICKS = TICKS_PER_SECOND * 5;
 constexpr std::size_t RENDER_ROWS_BEHIND = 3;
 constexpr std::size_t RENDER_ROWS_AHEAD = 7;
-// Song mapping from the EXE's calls to the song loader @0x57a8:
-//   song 0      = title / main menu (@0x207 at startup, @0x4586)
-//   song 1      = level select and the other menus (@0x5174, @0x4cfc, @0x4e41)
+// Song mapping, from every call to the song loader @0x57a8 (which early-returns if
+// the requested song is already playing). Each site is identified by the asset its
+// routine loads immediately afterwards:
+//   @0x207  song 0 at startup; @0x4586 song 0 then loads intro.lzs   -> INTRO
+//   @0x4e41 song 1 then loads mainmenu.lzs                           -> MAIN MENU
+//   @0x4cfc song 1 (setmenu.lzs routine)                             -> SETTINGS
+//   @0x5174 song 1 then loads gomenu.lzs                             -> LEVEL SELECT
+//   @0x2c9  song = rand()%12 + 2, stepped by one if it would repeat the previous
+//           (PRNG @0x19c, then div 12 @0x2a4)                        -> GAMEPLAY
+// So the intro has its own song, the main menu starts "the main song" (1), that
+// keeps playing through the level select, and only starting a road changes it.
 //   songs 2..13 = the twelve in-game tracks. Gameplay picks one at RANDOM
 //                 (@0x2a4-0x2c8: index = rand % 12 + 2, and if it repeats the
 //                 previous choice it steps to (prev + 1) % 12 so the same track
 //                 never plays twice running).
-constexpr uint8_t TITLE_SONG_INDEX = 0;
+constexpr uint8_t INTRO_SONG_INDEX = 0;
 constexpr uint8_t MENU_SONG_INDEX = 1;
 constexpr uint8_t GAMEPLAY_SONG_FIRST = 2;
 constexpr uint8_t GAMEPLAY_SONG_COUNT = 12;
@@ -186,7 +194,7 @@ AppTickResult AttractModeApp::tick(AppInput input) {
 
 void AttractModeApp::tick_intro(AppInput input, std::vector<AudioCommand>& audio) {
     if (!intro_song_started_) {
-        audio.push_back(AudioCommand::play_song(0));
+        audio.push_back(AudioCommand::play_song(INTRO_SONG_INDEX));
         intro_song_started_ = true;
     }
     if (!intro_sample_started_ && intro_tick_ >= INTRO_SOUND_DELAY_TICKS) {
@@ -209,7 +217,7 @@ void AttractModeApp::tick_intro(AppInput input, std::vector<AudioCommand>& audio
 void AttractModeApp::tick_main_menu(AppInput input,
                                     std::vector<AudioCommand>& audio) {
     if (!menu_song_started_) {
-        audio.push_back(AudioCommand::play_song(TITLE_SONG_INDEX));
+        audio.push_back(AudioCommand::play_song(MENU_SONG_INDEX));
         menu_song_started_ = true;
     }
 
