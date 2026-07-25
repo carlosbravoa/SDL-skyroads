@@ -142,6 +142,13 @@ struct GameplayFrameResult {
 // which is what lets a ship that fell off the road drop out of view.
 constexpr std::size_t EXPLOSION_DEATH_TICKS = 42;
 constexpr std::size_t OTHER_DEATH_TICKS = 108;
+// Falling off the road: the EXE dwells the full OTHER_DEATH_TICKS (108 ticks = 3.0s
+// at the original's 36Hz tick -- PIT divisor 6628 -> 180Hz, ISR ticks 2 per 10
+// interrupts). Play-testing against the original says the fall was clearly shorter
+// than that, and by ~this point the ship has dropped out of sight anyway, so this is
+// a deliberate, tunable divergence. Raise to OTHER_DEATH_TICKS for the literal EXE
+// behaviour.
+constexpr std::size_t FALL_DEATH_TICKS = 45;
 
 struct GameplaySession {
     Level level;

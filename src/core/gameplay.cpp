@@ -551,9 +551,9 @@ bool GameplaySession::death_animation_finished() const {
     if (ship.state == ShipState::Alive) return false;
     if (!death_frame_index.has_value()) return true;
     const std::size_t elapsed = frame_index_ - *death_frame_index;
-    const std::size_t needed = ship.state == ShipState::Exploded
-                                   ? EXPLOSION_DEATH_TICKS
-                                   : OTHER_DEATH_TICKS;
+    std::size_t needed = OTHER_DEATH_TICKS;
+    if (ship.state == ShipState::Exploded) needed = EXPLOSION_DEATH_TICKS;
+    else if (ship.state == ShipState::Fallen) needed = FALL_DEATH_TICKS;
     return elapsed >= needed;
 }
 

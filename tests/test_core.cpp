@@ -196,13 +196,14 @@ static void test_fallen_keeps_falling(const RoadsArchive& roads) {
     CHECK_TRUE(frame.events.empty());
 
     // The death animation must run for a while before the result screen shows,
-    // so the fall is actually visible (108 ticks in the EXE).
+    // so the fall is actually visible.
     CHECK_TRUE(!session.death_animation_finished());
-    for (std::size_t i = 0; i < OTHER_DEATH_TICKS + 1; ++i) {
+    for (std::size_t i = 0; i < FALL_DEATH_TICKS + 1; ++i) {
         session.run_frame(ControllerState::neutral());
     }
     CHECK_TRUE(session.death_animation_finished());
-    CHECK_TRUE(session.ship.y_position < 0.0); // fell well below the road
+    // Fallen far enough below road level to be out of the player's view.
+    CHECK_TRUE(session.ship.y_position < GROUND_Y - 25.0);
 }
 
 // ---- app state machine -----------------------------------------------------
