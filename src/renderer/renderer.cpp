@@ -1143,18 +1143,35 @@ void ReferenceRenderer::render_go_menu(FrameBuffer320x200& frame,
     frame.clear(RgbColor(0, 0, 0));
     draw_archive_frame(frame, assets_.go_menu, 0, 1.0f, 1.0f);
 
+    // Each road shows a row of small markers counting how many times it has been
+    // completed (EXE @0x51ce-0x525a): GOMENU frame 1 is the 6x5 marker sprite, drawn
+    // at most 7 times, stepping 7px, from base offset 0x11f0 = (x 112, y 14) with
+    // +160 for the right-hand column.
+    for (std::size_t flat = 0; flat < scene.completions.size(); ++flat) {
+        const int count = std::min<int>(scene.completions[flat], 7);
+        if (count == 0) continue;
+        const int mark_x = 112 + (flat >= 15 ? 160 : 0);
+        const int mark_y =
+            14 + static_cast<int>((flat / 3) % 5) * 39 + static_cast<int>(flat % 3) * 9;
+        if (assets_.go_menu.frames.size() < 2 || assets_.go_menu.frames[1].empty()) {
+            continue;
+        }
+        const ImageFrame& mark = assets_.go_menu.frames[1].front();
+        for (int i = 0; i < count; ++i) {
+            draw_sprite(frame, mark, mark_x + i * 7, mark_y, 1);
+        }
+    }
+
+    // Cursor placement (EXE @0x50e3-0x512d): base offset 0xf3e = (x 62, y 12), rows
+    // step 39px per world and 9px per road, +160 for the right-hand column.
     const std::size_t world = scene.selected_world;
-    const bool right_col = world >= 5;
     const int row = static_cast<int>(world % 5);
     const int road = static_cast<int>(scene.selected_level);
-    const int text_x0 = right_col ? 219 : 59;
-    const int text_x1 = right_col ? 252 : 92;
-    const int text_y = 13 + row * 39 + road * 9;
+    const int cursor_x = 62 + (world >= 5 ? 160 : 0);
+    const int cursor_y = 12 + row * 39 + road * 9;
 
-    // White outline box around the selected "Road N", plus an orange marker dot.
-    stroke_rect(frame, text_x0 - 3, text_y - 2, (text_x1 - text_x0) + 6, 9,
-                RgbColor(232, 232, 245));
-    frame.fill_rect(text_x1 + 6, text_y + 1, 4, 4, RgbColor(240, 150, 60));
+    // The original highlights the selected road by redrawing its text; we outline it.
+    stroke_rect(frame, cursor_x - 3, cursor_y - 1, 37, 9, RgbColor(232, 232, 245));
 }
 
 void ReferenceRenderer::render_play_scene(FrameBuffer320x200& frame,

@@ -6,6 +6,7 @@
 // scene payloads (DemoPlayback and Gameplay share DemoPlaybackState).
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -149,6 +150,9 @@ struct GoMenuScene {
     std::size_t selected_level; // 0..2 within the world
     std::size_t world_count;
     std::size_t road_index; // resolved road (1..30)
+    // Times each of the 30 roads has been completed, indexed by the menu's flat
+    // index (column * 15 + world_row * 3 + road).
+    std::array<uint8_t, 30> completions{};
     uint16_t gravity;
     uint16_t fuel;
     uint16_t oxygen;
@@ -227,6 +231,9 @@ private:
     std::size_t help_page_;
     std::size_t selected_world_;
     std::size_t selected_level_;
+    // Per-road completion counts (the EXE's ds:0x452a, 30 words), shown in the level
+    // select as a row of small markers next to each road.
+    std::array<uint8_t, 30> road_completions_{};
     bool was_gameover_;
     bool awaiting_advance_release_;
     bool intro_song_started_;

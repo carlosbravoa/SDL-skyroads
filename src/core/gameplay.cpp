@@ -549,7 +549,9 @@ GameplaySession::GameplaySession(Level level_in)
 
 bool GameplaySession::death_animation_finished() const {
     if (ship.state == ShipState::Alive) return false;
-    if (!death_frame_index.has_value()) return true;
+    // Dead but the death tick has not been stamped yet: the animation has not even
+    // started, so it certainly has not finished.
+    if (!death_frame_index.has_value()) return false;
     const std::size_t elapsed = frame_index_ - *death_frame_index;
     std::size_t needed = OTHER_DEATH_TICKS;
     if (ship.state == ShipState::Exploded) needed = EXPLOSION_DEATH_TICKS;

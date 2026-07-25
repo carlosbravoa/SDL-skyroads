@@ -121,6 +121,24 @@ AttractModeApp::AttractModeApp(std::vector<skyroads::data::Level> levels,
     assert(!levels_.empty() && "AttractModeApp requires at least one level");
 }
 
+// The GOMENU cursor in the original is a single flat index 0..29 (ds:0x933e), laid
+// out as two columns of 15: the left column holds worlds 0-4 and the right worlds
+// 5-9, each world contributing three roads. Grid maths from the draw loop @0x51ce
+// and the cursor placement @0x50e3: column = idx/15, world row = (idx/3)%5,
+// road = idx%3.
+namespace {
+constexpr std::size_t GO_MENU_ENTRIES = 30;
+constexpr std::size_t GO_MENU_COLUMN_ENTRIES = 15;
+
+std::size_t go_menu_flat_index(std::size_t world, std::size_t road) {
+    return (world / 5) * GO_MENU_COLUMN_ENTRIES + (world % 5) * 3 + road;
+}
+std::size_t go_menu_world_of(std::size_t flat) {
+    return (flat / GO_MENU_COLUMN_ENTRIES) * 5 + (flat / 3) % 5;
+}
+std::size_t go_menu_road_of(std::size_t flat) { return flat % 3; }
+} // namespace
+
 std::size_t AttractModeApp::world_count() const {
     // Road 0 is the demo level; roads 1.. are 3 levels per world.
     const std::size_t playable = levels_.size() > 1 ? levels_.size() - 1 : 0;
@@ -253,29 +271,27 @@ void AttractModeApp::tick_go_menu(AppInput input, std::vector<AudioCommand>& aud
         enter_main_menu(audio);
         return;
     }
-    // The GOMENU grid is two columns (worlds 0-4 left, 5-9 right), each world a
-    // row of 3 roads. Left/Right switch column; Up/Down move road, spilling into
-    // the adjacent world in the same column.
-    const std::size_t worlds = world_count();
-    const std::size_t row = selected_world_ % 5;
-    if (input.left && selected_world_ >= 5) selected_world_ -= 5;
-    if (input.right && selected_world_ + 5 < worlds) selected_world_ += 5;
-    if (input.up) {
-        if (selected_level_ > 0) {
-            selected_level_ -= 1;
-        } else if (row > 0) {
-            selected_world_ -= 1; // previous world in this column
-            selected_level_ = 2;
-        }
+    // Exact navigation from the EXE (@0x52cb-0x5305), operating on the flat index:
+    //   Up    idx - 1, stopping at 0
+    //   Down  idx + 1
+    //   Left  idx - 15, or 0 when already in the left column
+    //   Right idx + 15
+    // followed by a single clamp to the last entry (@0x527f). Note Up/Down walk the
+    // flat list continuously, so they cross between the columns (Up from the top of
+    // the right column lands on the bottom of the left one) -- and Left from the left
+    // column jumps to the very first entry rather than doing nothing.
+    const std::size_t entries =
+        std::min(GO_MENU_ENTRIES, levels_.size() > 1 ? levels_.size() - 1 : 1);
+    std::size_t flat = go_menu_flat_index(selected_world_, selected_level_);
+    if (input.up && flat > 0) flat -= 1;
+    if (input.down) flat += 1;
+    if (input.left) {
+        flat = flat >= GO_MENU_COLUMN_ENTRIES ? flat - GO_MENU_COLUMN_ENTRIES : 0;
     }
-    if (input.down) {
-        if (selected_level_ < 2) {
-            selected_level_ += 1;
-        } else if (row < 4 && selected_world_ + 1 < worlds) {
-            selected_world_ += 1; // next world in this column
-            selected_level_ = 0;
-        }
-    }
+    if (input.right) flat += GO_MENU_COLUMN_ENTRIES;
+    if (flat >= entries) flat = entries - 1;
+    selected_world_ = go_menu_world_of(flat);
+    selected_level_ = go_menu_road_of(flat);
 
     if (input.enter) {
         current_level_index_ = selected_road_index();
@@ -324,15 +340,27 @@ void AttractModeApp::tick_gameplay(AppInput input,
         return;
     }
 
-    const bool over = gameplay_session_.did_win ||
-                      gameplay_session_.ship.state != ShipState::Alive;
-    if (over) {
+    // Outer flow from the EXE (@0x339-0x3b7): the level routine returns the outcome
+    // code, and dying (outcomes 1-5) loops straight back into the SAME road without
+    // ever showing the menu. Only completing it (outcome 0) bumps that road's
+    // completion count, steps the cursor to the next entry, and returns to the menu.
+    if (gameplay_session_.ship.state != ShipState::Alive) {
+        start_gameplay(audio); // died -> immediately retry the same road
+        return;
+    }
+
+    if (gameplay_session_.did_win) {
         // Latch on the first over-frame and require the throttle/jump keys to be
         // released before a press counts — otherwise a held Space/Enter from
         // gameplay would instantly skip the result screen (the "auto-loop" bug).
         if (!was_gameover_) {
             was_gameover_ = true;
             awaiting_advance_release_ = true;
+            const std::size_t flat =
+                go_menu_flat_index(selected_world_, selected_level_);
+            if (flat < road_completions_.size() && road_completions_[flat] < 255) {
+                road_completions_[flat] += 1;
+            }
         }
         if (awaiting_advance_release_) {
             if (!input.enter_held && !input.space_held) {
@@ -341,14 +369,14 @@ void AttractModeApp::tick_gameplay(AppInput input,
             return;
         }
         if (input.enter) {
-            if (gameplay_session_.did_win && selected_level_ < 2) {
-                selected_level_ += 1; // advance within the world
-                current_level_index_ = selected_road_index();
-                start_gameplay(audio);
-            } else {
-                // Crashed, or finished the world -> back to level select.
-                enter_select(audio, true);
-            }
+            const std::size_t entries = std::min(
+                GO_MENU_ENTRIES, levels_.size() > 1 ? levels_.size() - 1 : 1);
+            std::size_t flat =
+                go_menu_flat_index(selected_world_, selected_level_) + 1;
+            if (flat >= entries) flat = entries - 1;
+            selected_world_ = go_menu_world_of(flat);
+            selected_level_ = go_menu_road_of(flat);
+            enter_select(audio, true);
         }
         return;
     }
@@ -440,6 +468,7 @@ GoMenuScene AttractModeApp::current_go_menu_scene() const {
     scene.selected_level = selected_level_;
     scene.world_count = world_count();
     scene.road_index = road;
+    scene.completions = road_completions_;
     scene.gravity = level.gravity;
     scene.fuel = level.fuel;
     scene.oxygen = level.oxygen;

@@ -291,24 +291,63 @@ static void test_app_select_navigates_world(const RoadsArchive& roads,
     CHECK_TRUE(play.mode == AppMode::Gameplay);
 }
 
-static void test_app_death_returns_to_select(const RoadsArchive& roads,
-                                             const DemoRecording& demo) {
+// Dying retries the same road immediately, without passing through the level select
+// (EXE @0x3af-0x3b4: only completing a road leaves the play loop).
+static void test_app_death_restarts_road(const RoadsArchive& roads,
+                                         const DemoRecording& demo) {
     AttractModeApp app = make_app(roads, demo);
     for (int i = 0; i < 35; ++i) app.tick(AppInput{});
     app.tick(key(&AppInput::space));
     app.tick(key(&AppInput::enter)); // GoMenu
     app.tick(key(&AppInput::enter)); // Gameplay
-    // Force a crash.
+    const std::size_t road = app.current_go_menu_scene().road_index;
+
     app.gameplay_session().ship.state = ShipState::Exploded;
-    // A held Space (throttle) must NOT advance while awaiting release...
-    AppInput held_space;
-    held_space.space_held = true;
-    AppTickResult still = app.tick(held_space);
-    CHECK_TRUE(still.mode == AppMode::Gameplay);
-    // ...release, then a fresh Enter returns to the select screen (not restart).
-    app.tick(AppInput{});
-    AppTickResult back = app.tick(key(&AppInput::enter));
-    CHECK_TRUE(back.mode == AppMode::GoMenu);
+    // The explosion plays out first, still in gameplay.
+    AppTickResult during = app.tick(AppInput{});
+    CHECK_TRUE(during.mode == AppMode::Gameplay);
+    CHECK_TRUE(during.render_scene.play.snapshot.craft_state != ShipState::Alive);
+
+    // Once it finishes the same road restarts on its own — no menu, no keypress.
+    for (std::size_t i = 0; i < EXPLOSION_DEATH_TICKS + 3; ++i) app.tick(AppInput{});
+    AppTickResult after = app.tick(AppInput{});
+    CHECK_TRUE(after.mode == AppMode::Gameplay);
+    CHECK_TRUE(after.render_scene.play.snapshot.craft_state == ShipState::Alive);
+    CHECK_EQ(app.current_go_menu_scene().road_index, road);
+}
+
+// Up/Down walk a single flat 0..29 list, so they cross between the two columns, and
+// Left from the left column snaps to the first entry (EXE @0x52cb-0x5305).
+static void test_go_menu_flat_navigation(const RoadsArchive& roads,
+                                         const DemoRecording& demo) {
+    AttractModeApp app = make_app(roads, demo);
+    for (int i = 0; i < 35; ++i) app.tick(AppInput{});
+    app.tick(key(&AppInput::space));
+    app.tick(key(&AppInput::enter)); // GoMenu
+
+    // Right moves +15 => world 0 road 0 -> world 5 road 0 (top of the right column).
+    AppTickResult r = app.tick(key(&AppInput::right));
+    CHECK_EQ(r.render_scene.go_menu.selected_world, static_cast<std::size_t>(5));
+    CHECK_EQ(r.render_scene.go_menu.selected_level, static_cast<std::size_t>(0));
+
+    // Up from there is index 14: the LAST road of world 4, in the left column.
+    AppTickResult u = app.tick(key(&AppInput::up));
+    CHECK_EQ(u.render_scene.go_menu.selected_world, static_cast<std::size_t>(4));
+    CHECK_EQ(u.render_scene.go_menu.selected_level, static_cast<std::size_t>(2));
+
+    // Left while already in the left column jumps to the very first entry.
+    AppTickResult l = app.tick(key(&AppInput::left));
+    CHECK_EQ(l.render_scene.go_menu.selected_world, static_cast<std::size_t>(0));
+    CHECK_EQ(l.render_scene.go_menu.selected_level, static_cast<std::size_t>(0));
+
+    // Up at the first entry stays put.
+    AppTickResult top = app.tick(key(&AppInput::up));
+    CHECK_EQ(top.render_scene.go_menu.selected_world, static_cast<std::size_t>(0));
+    CHECK_EQ(top.render_scene.go_menu.selected_level, static_cast<std::size_t>(0));
+
+    // Down steps one road at a time.
+    AppTickResult d = app.tick(key(&AppInput::down));
+    CHECK_EQ(d.render_scene.go_menu.selected_level, static_cast<std::size_t>(1));
 }
 
 static void test_app_help_cycle(const RoadsArchive& roads,
@@ -404,7 +443,8 @@ CHECK_MAIN_BEGIN()
     test_app_idle_demo(roads, demo);
     test_app_start_gameplay(roads, demo);
     test_app_select_navigates_world(roads, demo);
-    test_app_death_returns_to_select(roads, demo);
+    test_app_death_restarts_road(roads, demo);
+    test_go_menu_flat_navigation(roads, demo);
     test_app_help_cycle(roads, demo);
     test_app_gameplay_scene(roads, demo);
     test_app_death_frame(roads, demo);
