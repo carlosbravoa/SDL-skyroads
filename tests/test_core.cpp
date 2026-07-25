@@ -265,6 +265,8 @@ static void test_app_start_gameplay(const RoadsArchive& roads,
     AppTickResult tick = app.tick(key(&AppInput::enter));
     CHECK_TRUE(tick.mode == AppMode::Gameplay);
     CHECK_TRUE(tick.render_scene.tag == RenderScene::Tag::Gameplay);
+    // Gameplay uses the twelve in-game tracks (songs 2..13), starting at 2 and
+    // never repeating back to back, rather than one fixed song.
     CHECK_EQ(tick.audio_commands,
              (std::vector<AudioCommand>{AudioCommand::play_song(2)}));
 }

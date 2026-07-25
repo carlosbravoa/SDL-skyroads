@@ -213,6 +213,7 @@ private:
     void tick_go_menu(AppInput input, std::vector<AudioCommand>& audio);
     void tick_demo(AppInput input, std::vector<AudioCommand>& audio);
     void tick_gameplay(AppInput input, std::vector<AudioCommand>& audio);
+    uint8_t next_gameplay_song();
     void start_demo(std::vector<AudioCommand>& audio);
     void start_gameplay(std::vector<AudioCommand>& audio);
     void enter_select(std::vector<AudioCommand>& audio, bool switch_song);
@@ -246,6 +247,7 @@ private:
     bool awaiting_advance_release_;
     // Ticks the "Road Completed" banner has been on screen, and whether the road
     // being played was the last uncompleted one (which makes it "The End" instead).
+    std::size_t gameplay_song_pick_ = 0;
     std::size_t win_message_ticks_ = 0;
     bool current_road_is_final_ = false;
     bool intro_song_started_;

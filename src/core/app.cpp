@@ -16,9 +16,17 @@ constexpr std::size_t CREDIT_FRAME_TICKS = TICKS_PER_SECOND * 4;
 constexpr std::size_t MENU_IDLE_DEMO_TICKS = TICKS_PER_SECOND * 5;
 constexpr std::size_t RENDER_ROWS_BEHIND = 3;
 constexpr std::size_t RENDER_ROWS_AHEAD = 7;
+// Song mapping from the EXE's calls to the song loader @0x57a8:
+//   song 0      = title / main menu (@0x207 at startup, @0x4586)
+//   song 1      = level select and the other menus (@0x5174, @0x4cfc, @0x4e41)
+//   songs 2..13 = the twelve in-game tracks. Gameplay picks one at RANDOM
+//                 (@0x2a4-0x2c8: index = rand % 12 + 2, and if it repeats the
+//                 previous choice it steps to (prev + 1) % 12 so the same track
+//                 never plays twice running).
+constexpr uint8_t TITLE_SONG_INDEX = 0;
 constexpr uint8_t MENU_SONG_INDEX = 1;
-constexpr uint8_t GAMEPLAY_SONG_INDEX = 2;
-constexpr uint8_t DEMO_SONG_INDEX = 2;
+constexpr uint8_t GAMEPLAY_SONG_FIRST = 2;
+constexpr uint8_t GAMEPLAY_SONG_COUNT = 12;
 
 MenuCursor menu_cursor_move_by(MenuCursor cursor, int delta) {
     const int idx = static_cast<int>(menu_cursor_index(cursor)) + delta;
@@ -201,7 +209,7 @@ void AttractModeApp::tick_intro(AppInput input, std::vector<AudioCommand>& audio
 void AttractModeApp::tick_main_menu(AppInput input,
                                     std::vector<AudioCommand>& audio) {
     if (!menu_song_started_) {
-        audio.push_back(AudioCommand::play_song(MENU_SONG_INDEX));
+        audio.push_back(AudioCommand::play_song(TITLE_SONG_INDEX));
         menu_song_started_ = true;
     }
 
@@ -387,11 +395,22 @@ void AttractModeApp::tick_gameplay(AppInput input,
     emit_sfx_for_events(result.events, audio);
 }
 
+// Picks the next in-game track. The original chooses at random and only guards
+// against repeating the previous one; we step deterministically instead so the
+// sequence is reproducible for tests, while still using all twelve and never
+// repeating back to back.
+uint8_t AttractModeApp::next_gameplay_song() {
+    const auto song =
+        static_cast<uint8_t>(GAMEPLAY_SONG_FIRST + gameplay_song_pick_);
+    gameplay_song_pick_ = (gameplay_song_pick_ + 1) % GAMEPLAY_SONG_COUNT;
+    return song;
+}
+
 void AttractModeApp::start_demo(std::vector<AudioCommand>& audio) {
     mode_ = AppMode::DemoPlayback;
     menu_idle_tick_ = 0;
     demo_session_ = GameplaySession(levels_[demo_level_index_]);
-    audio.push_back(AudioCommand::play_song(DEMO_SONG_INDEX));
+    audio.push_back(AudioCommand::play_song(next_gameplay_song()));
 }
 
 void AttractModeApp::start_gameplay(std::vector<AudioCommand>& audio) {
@@ -414,7 +433,7 @@ void AttractModeApp::start_gameplay(std::vector<AudioCommand>& audio) {
             completed == GO_MENU_ENTRIES - 1;
     }
     gameplay_session_ = GameplaySession(levels_[current_level_index_]);
-    audio.push_back(AudioCommand::play_song(GAMEPLAY_SONG_INDEX));
+    audio.push_back(AudioCommand::play_song(next_gameplay_song()));
 }
 
 void AttractModeApp::enter_main_menu(std::vector<AudioCommand>& audio) {
