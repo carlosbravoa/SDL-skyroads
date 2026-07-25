@@ -9,7 +9,9 @@
 namespace skyroads::audio {
 namespace {
 
-constexpr float MUSIC_TICK_SECONDS = 0.005f;
+// The music sequencer is called from the timer ISR on EVERY PIT interrupt
+// (@0x3b03 -> 0x5a39), and the PIT divisor 0x19E4 gives 1193182/6628 = 180.02 Hz.
+constexpr float MUSIC_TICK_SECONDS = 1.0f / 180.02f;
 constexpr float INTRO_GAIN = 0.40f;
 constexpr float MUSIC_GAIN = 0.90f; // real OPL2 output level; was tuned for the old approximation
 constexpr float MIN_DB = -96.0f;
@@ -423,12 +425,17 @@ void MuzaxPlayer::render(OplSynth& synth, std::vector<float>& out) {
 
 void MuzaxPlayer::read_note(OplSynth& synth) {
     if (!current_song_ || commands_.empty()) return;
-    if (paused_ > 0) {
-        paused_ -= 1;
-        return;
-    }
 
-    while (paused_ == 0) {
+    // Mirrors the driver's loop at 0x5a39: the delay counter is tested and
+    // decremented at the TOP, and after a delay command sets it the code jumps back
+    // to that same test -- so the tick that sets a delay of N already consumes one
+    // of the N. Returning straight after setting it would spend N+1 ticks and play
+    // the song too slowly, badly so for the short delays that dominate.
+    for (std::size_t guard = 0; guard < commands_.size() + 2; ++guard) {
+        if (paused_ > 0) {
+            paused_ -= 1;
+            return;
+        }
         if (cursor_ + 1 >= commands_.size()) cursor_ = 0;
 
         uint8_t cmd_low = commands_[cursor_];
@@ -441,7 +448,7 @@ void MuzaxPlayer::read_note(OplSynth& synth) {
         switch (function_type) {
             case 0:
                 paused_ = cmd_high;
-                return;
+                break; // back to the delay test, as the driver's jmp does
             case 1:
                 stop_note(cmd_low, synth);
                 configure_instrument(cmd_low, cmd_high, synth);
