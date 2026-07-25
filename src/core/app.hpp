@@ -128,6 +128,9 @@ struct DemoPlaybackState {
     bool is_demo;
     // Result text waits on this so it never covers the explosion / the ship falling.
     bool death_animation_finished;
+    // True when the completed road was the last uncompleted one: the banner then
+    // reads "The End" rather than "Road Completed".
+    bool is_final_road;
     ShipState craft_state;
     GameSnapshot snapshot;
     ShipRenderState ship;
@@ -236,6 +239,10 @@ private:
     std::array<uint8_t, 30> road_completions_{};
     bool was_gameover_;
     bool awaiting_advance_release_;
+    // Ticks the "Road Completed" banner has been on screen, and whether the road
+    // being played was the last uncompleted one (which makes it "The End" instead).
+    std::size_t win_message_ticks_ = 0;
+    bool current_road_is_final_ = false;
     bool intro_song_started_;
     bool intro_sample_started_;
     bool menu_song_started_;

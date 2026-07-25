@@ -129,6 +129,9 @@ AttractModeApp::AttractModeApp(std::vector<skyroads::data::Level> levels,
 namespace {
 constexpr std::size_t GO_MENU_ENTRIES = 30;
 constexpr std::size_t GO_MENU_COLUMN_ENTRIES = 15;
+// How long the "Road Completed" banner stays up: the EXE's delay loop is called with
+// 0x1b = 27 ticks (@0x2c90 -> 0x443d), i.e. 0.75s at the 36Hz tick.
+constexpr std::size_t COMPLETION_MESSAGE_TICKS = 27;
 
 std::size_t go_menu_flat_index(std::size_t world, std::size_t road) {
     return (world / 5) * GO_MENU_COLUMN_ENTRIES + (world % 5) * 3 + road;
@@ -350,34 +353,31 @@ void AttractModeApp::tick_gameplay(AppInput input,
     }
 
     if (gameplay_session_.did_win) {
-        // Latch on the first over-frame and require the throttle/jump keys to be
-        // released before a press counts — otherwise a held Space/Enter from
-        // gameplay would instantly skip the result screen (the "auto-loop" bug).
+        // Completing a road prints a banner and holds it for 0x1b = 27 ticks, which a
+        // keypress can cut short (EXE @0x2c62-0x2c90, delay loop @0x443d). There is no
+        // "press a key to continue" -- it simply times out and returns to the menu.
         if (!was_gameover_) {
             was_gameover_ = true;
-            awaiting_advance_release_ = true;
+            win_message_ticks_ = 0;
             const std::size_t flat =
                 go_menu_flat_index(selected_world_, selected_level_);
             if (flat < road_completions_.size() && road_completions_[flat] < 255) {
                 road_completions_[flat] += 1;
             }
         }
-        if (awaiting_advance_release_) {
-            if (!input.enter_held && !input.space_held) {
-                awaiting_advance_release_ = false;
-            }
-            return;
-        }
-        if (input.enter) {
-            const std::size_t entries = std::min(
-                GO_MENU_ENTRIES, levels_.size() > 1 ? levels_.size() - 1 : 1);
-            std::size_t flat =
-                go_menu_flat_index(selected_world_, selected_level_) + 1;
-            if (flat >= entries) flat = entries - 1;
-            selected_world_ = go_menu_world_of(flat);
-            selected_level_ = go_menu_road_of(flat);
-            enter_select(audio, true);
-        }
+        win_message_ticks_ += 1;
+        const bool skipped = input.enter || input.space || input.escape;
+        if (win_message_ticks_ < COMPLETION_MESSAGE_TICKS && !skipped) return;
+
+        // Then the cursor steps to the next entry and we drop back to the level
+        // select (EXE @0x39f), where the new completion marker is visible.
+        const std::size_t entries =
+            std::min(GO_MENU_ENTRIES, levels_.size() > 1 ? levels_.size() - 1 : 1);
+        std::size_t flat = go_menu_flat_index(selected_world_, selected_level_) + 1;
+        if (flat >= entries) flat = entries - 1;
+        selected_world_ = go_menu_world_of(flat);
+        selected_level_ = go_menu_road_of(flat);
+        enter_select(audio, true);
         return;
     }
 
@@ -399,6 +399,20 @@ void AttractModeApp::start_gameplay(std::vector<AudioCommand>& audio) {
     menu_idle_tick_ = 0;
     was_gameover_ = false;
     awaiting_advance_release_ = false;
+    win_message_ticks_ = 0;
+    // "The End" replaces "Road Completed" when this road is the only one still
+    // uncompleted (EXE @0x30e-0x358: count the non-zero completion entries and
+    // compare against 29 while this road's own entry is still zero).
+    {
+        const std::size_t flat = go_menu_flat_index(selected_world_, selected_level_);
+        std::size_t completed = 0;
+        for (uint8_t c : road_completions_) {
+            if (c != 0) completed += 1;
+        }
+        current_road_is_final_ =
+            flat < road_completions_.size() && road_completions_[flat] == 0 &&
+            completed == GO_MENU_ENTRIES - 1;
+    }
     gameplay_session_ = GameplaySession(levels_[current_level_index_]);
     audio.push_back(AudioCommand::play_song(GAMEPLAY_SONG_INDEX));
 }
@@ -571,6 +585,7 @@ DemoPlaybackState AttractModeApp::build_play_scene(const GameplaySession& sessio
     state.did_win = session.did_win;
     state.is_demo = is_demo;
     state.death_animation_finished = session.death_animation_finished();
+    state.is_final_road = !is_demo && current_road_is_final_;
     state.craft_state = session.ship.state;
     state.snapshot = GameSnapshot{
         session.ship.x_position,

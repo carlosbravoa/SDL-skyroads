@@ -1196,24 +1196,13 @@ void ReferenceRenderer::render_play_scene(FrameBuffer320x200& frame,
     draw_gauge(frame, assets_.fuel_gauge, scene.snapshot.fuel_percent);
     const double speed = scene.snapshot.z_velocity / (0x2AAA / 65536.0);
     draw_gauge(frame, assets_.speed_gauge, speed);
-    // Result indicators (not the GOMENU art — that is the level-select screen).
-    if (!scene.is_demo) {
-        if (scene.did_win) {
-            draw_text_centered(frame, "LEVEL COMPLETE", 56, RgbColor(150, 255, 170), 2);
-            draw_text_centered(frame, "PRESS ENTER", 76, RgbColor(220, 235, 255), 1);
-        } else if (scene.snapshot.craft_state != ShipState::Alive &&
-                   scene.death_animation_finished) {
-            // The five outcomes the EXE distinguishes (ds:0x457c, NOTES Update 9).
-            const char* reason = "CRASHED";
-            switch (scene.snapshot.craft_state) {
-                case ShipState::Fallen: reason = "FELL OFF THE ROAD"; break;
-                case ShipState::OutOfFuel: reason = "OUT OF FUEL"; break;
-                case ShipState::OutOfOxygen: reason = "OUT OF OXYGEN"; break;
-                default: break;
-            }
-            draw_text_centered(frame, reason, 56, RgbColor(255, 110, 110), 2);
-            draw_text_centered(frame, "PRESS ENTER", 76, RgbColor(220, 235, 255), 1);
-        }
+    // Completing a road is the ONLY outcome the original puts a message up for
+    // (EXE @0x2c5a skips the whole banner unless the outcome is 0): it prints "Road
+    // Completed", or "The End" on the last remaining road, at y=80. Dying shows
+    // nothing at all -- the road simply restarts.
+    if (!scene.is_demo && scene.did_win) {
+        draw_text_centered(frame, scene.is_final_road ? "THE END" : "ROAD COMPLETED",
+                           80, RgbColor(220, 235, 255), 1);
     }
 }
 
