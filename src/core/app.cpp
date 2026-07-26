@@ -32,6 +32,9 @@ constexpr std::size_t INTRO_TITLE_SETTLE_TICKS = 70;  // 0x4315(.., 0x46)     @0
 constexpr std::size_t CREDIT_FADE_TICKS = 50;         // 0x4315(.., 0x32)     @0x49f6
 constexpr std::size_t CREDIT_HOLD_TICKS = 50;         // 0x443d(0x32)         @0x49fc
 constexpr std::size_t INTRO_OUTRO_FADE_TICKS = 36;    // 0x4b72(pal, 0, 0x24) @0x4a95
+// Reaching the end of a road hands over to @0xe58, which keeps drawing and moving for
+// 0x48 ticks before the completion banner.
+constexpr std::size_t ROAD_END_FLYOFF_TICKS = 72;
 // The credit loop runs i = 2..6 (@0x4989/@0x4995) over the seven (CMAP, CMAP, PICT)
 // sets loaded after the title, so it shows intro.lzs pictures 4..8. Sets 0 and 1 are
 // loaded but never displayed, and picture 9 is never even read.
@@ -412,14 +415,26 @@ void AttractModeApp::tick_gameplay(AppInput input,
         // Completing a road prints a banner and holds it for 0x1b = 27 ticks, which a
         // keypress can cut short (EXE @0x2c62-0x2c90, delay loop @0x443d). There is no
         // "press a key to continue" -- it simply times out and returns to the menu.
+        // Before any of that, the EXE flies the ship on for 0x48 = 72 ticks (@0xe58,
+        // entered from @0x23ff once the end of the road is reached and the ship is
+        // not dying). That loop forces y_position to 0 and keeps integrating z while
+        // redrawing, so the ship dives away below the dashboard and the scenery runs
+        // on for two seconds. ESC cuts it short. Only then does the banner appear.
         if (!was_gameover_) {
             was_gameover_ = true;
             win_message_ticks_ = 0;
+            road_end_ticks_ = 0;
+            gameplay_session_.ship.y_position = 0.0;
             const std::size_t flat =
                 go_menu_flat_index(selected_world_, selected_level_);
             if (flat < road_completions_.size() && road_completions_[flat] < 255) {
                 road_completions_[flat] += 1;
             }
+        }
+        if (road_end_ticks_ < ROAD_END_FLYOFF_TICKS && !input.escape) {
+            road_end_ticks_ += 1;
+            gameplay_session_.ship.z_position += gameplay_session_.ship.z_velocity;
+            return;
         }
         win_message_ticks_ += 1;
         const bool skipped = input.enter || input.space || input.escape;

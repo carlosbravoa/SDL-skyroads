@@ -273,6 +273,7 @@ private:
     // being played was the last uncompleted one (which makes it "The End" instead).
     std::size_t gameplay_song_pick_ = 0;
     std::size_t win_message_ticks_ = 0;
+    std::size_t road_end_ticks_ = 0;
     bool current_road_is_final_ = false;
     bool intro_song_started_;
     bool intro_sample_started_;

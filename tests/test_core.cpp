@@ -299,6 +299,34 @@ static void test_app_menu_has_no_idle_demo(const RoadsArchive& roads,
     }
 }
 
+// Completing a road first flies on for 72 ticks (@0xe58), then holds the banner for
+// 27 (@0x2c90), and only then returns to the level select with the completion counted.
+static void test_app_road_end_flyoff(const RoadsArchive& roads,
+                                     const DemoRecording& demo) {
+    AttractModeApp app = make_app(roads, demo);
+    app.tick(AppInput{});
+    app.tick(key(&AppInput::space));   // intro -> main menu
+    app.tick(key(&AppInput::enter));   // main menu -> level select
+    app.tick(key(&AppInput::enter));   // level select -> gameplay
+    CHECK_TRUE(app.mode() == AppMode::Gameplay);
+    // Seed the win directly.
+    app.gameplay_session().did_win = true;
+    // A road is finished at speed; the fly-off just keeps integrating whatever the
+    // ship had (@0xe92-0xea0), so give it some.
+    app.gameplay_session().ship.z_velocity = 0.5;
+    const double z_before = app.gameplay_session().ship.z_position;
+    for (int i = 0; i < 72; ++i) {
+        AppTickResult tick = app.tick(AppInput{});
+        CHECK_TRUE(tick.mode == AppMode::Gameplay);
+    }
+    // The ship kept moving through the fly-off and dropped out of view.
+    CHECK_TRUE(app.gameplay_session().ship.z_position > z_before);
+    CHECK_EQ(app.gameplay_session().ship.y_position, 0.0);
+    for (int i = 0; i < 27; ++i) app.tick(AppInput{});
+    CHECK_TRUE(app.mode() == AppMode::GoMenu);
+    CHECK_TRUE(app.road_completions()[0] >= 1);
+}
+
 static void test_app_start_gameplay(const RoadsArchive& roads,
                                     const DemoRecording& demo) {
     AttractModeApp app = make_app(roads, demo);
@@ -493,6 +521,7 @@ CHECK_MAIN_BEGIN()
     test_app_skip_intro(roads, demo);
     test_app_intro_runs_into_demo(roads, demo);
     test_app_menu_has_no_idle_demo(roads, demo);
+    test_app_road_end_flyoff(roads, demo);
     test_app_start_gameplay(roads, demo);
     test_app_select_navigates_world(roads, demo);
     test_app_death_restarts_road(roads, demo);
