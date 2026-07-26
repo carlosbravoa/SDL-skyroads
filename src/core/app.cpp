@@ -11,7 +11,6 @@ namespace {
 // The game's tick is the timer ISR's: PIT divisor 0x19E4 = 180.02 Hz, and the tick
 // counter ds:0x160c is bumped on 2 of every 10 interrupts (@0x3b06-0x3b14) = 36 Hz.
 constexpr std::size_t TICKS_PER_SECOND = 36;
-constexpr std::size_t MENU_IDLE_DEMO_TICKS = TICKS_PER_SECOND * 5;
 
 // ---- intro sequence (EXE routine @0x4575) ----------------------------------
 // Every value below is a literal tick count out of the disassembly. The helpers the
@@ -244,8 +243,11 @@ void AttractModeApp::tick_intro(AppInput input, std::vector<AudioCommand>& audio
         return;
     }
 
+    // Letting the intro play out returns "no key" (@0x221), and the outer loop then
+    // goes to the DEMO, not the menu -- still on song 0. Only a keypress reaches the
+    // main menu and its song.
     if (intro_tick_ >= final_credit_end_tick()) {
-        enter_main_menu(audio);
+        start_demo(audio);
         return;
     }
 
@@ -288,15 +290,11 @@ void AttractModeApp::tick_main_menu(AppInput input,
         return;
     }
 
-    if (navigated || input.escape || input.space) {
-        menu_idle_tick_ = 0;
-    } else {
-        menu_idle_tick_ += 1;
-    }
-
-    if (menu_idle_tick_ >= MENU_IDLE_DEMO_TICKS) {
-        start_demo(audio);
-    }
+    // No idle timeout here: the main menu routine @0x4e36 never reads the tick
+    // counter and never starts a demo. Attract mode is only ever reached by letting
+    // the intro run out, and once a key has taken you to the menu the game stays
+    // there. The port used to drop into a demo after five idle seconds.
+    (void)navigated;
 }
 
 void AttractModeApp::tick_help_menu(AppInput input,
@@ -366,13 +364,17 @@ void AttractModeApp::enter_select(std::vector<AudioCommand>& audio,
 }
 
 void AttractModeApp::tick_demo(AppInput input, std::vector<AudioCommand>& audio) {
-    if (input.escape || input.enter || input.space) {
-        return_to_menu(audio);
+    // ESC (ds:0xbaa in the watched-scancode table, tested @0x21e9) is the only key
+    // that ends a road, and it returns outcome 7. In the attract loop @0x36a-0x385
+    // outcome 7 is the single case that leaves for the main menu -- which is where
+    // song 1 finally starts. Every other key just lets the demo run on.
+    if (input.escape) {
+        enter_main_menu(audio);
         return;
     }
     if (sample_demo_input_for_ship(demo_recording_, demo_session_.ship) ==
         nullptr) {
-        return_to_menu(audio);
+        restart_intro(audio);
         return;
     }
     demo_session_.run_demo_frame(demo_recording_);
@@ -452,11 +454,27 @@ uint8_t AttractModeApp::next_gameplay_song() {
     return song;
 }
 
+// @0x229: an intro that returns "no key" sets the input source ds:0x9602 to 3, and
+// the outer loop then skips the main menu entirely and runs road 0 straight from
+// DEMO.REC (@0x26c). Note what is NOT there: any call to the song loader. The whole
+// attract mode plays through on song 0.
 void AttractModeApp::start_demo(std::vector<AudioCommand>& audio) {
+    (void)audio;
     mode_ = AppMode::DemoPlayback;
     menu_idle_tick_ = 0;
     demo_session_ = GameplaySession(levels_[demo_level_index_]);
-    audio.push_back(AudioCommand::play_song(next_gameplay_song()));
+}
+
+// @0x385: a demo that ends any way other than ESC jumps back to 0x219, which runs
+// the intro again -- so attract mode cycles intro, demo, intro, demo, ... The intro
+// re-requests song 0 (@0x4586), but the loader early-returns because it is already
+// playing (@0x57b1), so the music never restarts.
+void AttractModeApp::restart_intro(std::vector<AudioCommand>& audio) {
+    mode_ = AppMode::Intro;
+    intro_tick_ = 0;
+    intro_sample_started_ = false;
+    menu_idle_tick_ = 0;
+    audio.push_back(AudioCommand::play_song(INTRO_SONG_INDEX));
 }
 
 void AttractModeApp::start_gameplay(std::vector<AudioCommand>& audio) {

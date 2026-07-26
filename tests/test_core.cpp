@@ -254,15 +254,49 @@ static void test_app_skip_intro(const RoadsArchive& roads,
              (std::vector<AudioCommand>{AudioCommand::play_song(1)}));
 }
 
-static void test_app_idle_demo(const RoadsArchive& roads,
-                               const DemoRecording& demo) {
+// Letting the intro run out goes to attract mode, NOT the menu, and the music does
+// not change: the outer loop @0x229 sets the demo input source and jumps past the
+// main menu without touching the song loader. The main menu itself has no idle
+// timeout -- @0x4e36 never reads the tick counter.
+static void test_app_intro_runs_into_demo(const RoadsArchive& roads,
+                                          const DemoRecording& demo) {
     AttractModeApp app = make_app(roads, demo);
-    for (int i = 0; i < 35; ++i) app.tick(AppInput{});
+    bool reached_demo = false;
+    for (int i = 0; i < 4000 && !reached_demo; ++i) {
+        AppTickResult tick = app.tick(AppInput{});
+        // Song 0 is requested once at the start and never changed again.
+        for (const AudioCommand& command : tick.audio_commands) {
+            if (command.kind == AudioCommandKind::PlaySong) {
+                CHECK_EQ(static_cast<int>(command.value), 0);
+            }
+        }
+        if (tick.mode == AppMode::DemoPlayback) {
+            CHECK_TRUE(tick.render_scene.tag == RenderScene::Tag::DemoPlayback);
+            reached_demo = true;
+        } else {
+            CHECK_TRUE(tick.mode == AppMode::Intro);
+        }
+    }
+    CHECK_TRUE(reached_demo);
+
+    // ESC is the one key that ends the demo, and only then does song 1 start.
+    AppTickResult left = app.tick(key(&AppInput::escape));
+    CHECK_TRUE(left.mode == AppMode::MainMenu);
+    CHECK_EQ(left.audio_commands,
+             (std::vector<AudioCommand>{AudioCommand::play_song(1)}));
+}
+
+// The main menu never falls back into a demo, however long it is left alone.
+static void test_app_menu_has_no_idle_demo(const RoadsArchive& roads,
+                                           const DemoRecording& demo) {
+    AttractModeApp app = make_app(roads, demo);
+    app.tick(AppInput{});
     app.tick(key(&AppInput::space));
-    for (int i = 0; i < 70 * 5; ++i) app.tick(AppInput{});
-    AppTickResult tick = app.tick(AppInput{});
-    CHECK_TRUE(tick.mode == AppMode::DemoPlayback);
-    CHECK_TRUE(tick.render_scene.tag == RenderScene::Tag::DemoPlayback);
+    for (int i = 0; i < 36 * 30; ++i) {
+        AppTickResult tick = app.tick(AppInput{});
+        CHECK_TRUE(tick.mode == AppMode::MainMenu);
+        CHECK_TRUE(tick.audio_commands.empty());
+    }
 }
 
 static void test_app_start_gameplay(const RoadsArchive& roads,
@@ -457,7 +491,8 @@ CHECK_MAIN_BEGIN()
 
     test_app_intro(roads, demo);
     test_app_skip_intro(roads, demo);
-    test_app_idle_demo(roads, demo);
+    test_app_intro_runs_into_demo(roads, demo);
+    test_app_menu_has_no_idle_demo(roads, demo);
     test_app_start_gameplay(roads, demo);
     test_app_select_navigates_world(roads, demo);
     test_app_death_restarts_road(roads, demo);

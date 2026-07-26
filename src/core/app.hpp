@@ -236,6 +236,7 @@ private:
     void tick_gameplay(AppInput input, std::vector<AudioCommand>& audio);
     uint8_t next_gameplay_song();
     void start_demo(std::vector<AudioCommand>& audio);
+    void restart_intro(std::vector<AudioCommand>& audio);
     void start_gameplay(std::vector<AudioCommand>& audio);
     void enter_select(std::vector<AudioCommand>& audio, bool switch_song);
     void enter_main_menu(std::vector<AudioCommand>& audio);
