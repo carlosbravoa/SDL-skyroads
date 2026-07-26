@@ -22,14 +22,28 @@ using namespace skyroads;
 
 namespace {
 
-constexpr int WINDOW_WIDTH = 1280;
-constexpr int WINDOW_HEIGHT = 960;
 // VGA mode 13h pixels are not square: the 320x200 framebuffer filled a 4:3 display,
-// so every pixel is 20% taller than it is wide. Presenting through a 4:3 logical
-// viewport reproduces that and letterboxes whatever window size the user picks,
-// instead of stretching the picture to the window's own aspect.
-constexpr int LOGICAL_WIDTH = 640;
-constexpr int LOGICAL_HEIGHT = 480;
+// so every pixel is 20% taller than it is wide. The renderer presents through a
+// 320x240 logical viewport, which restores that 4:3 shape, and integer scaling keeps
+// every pixel a clean square block instead of an uneven smear.
+constexpr int LOGICAL_WIDTH = 320;
+constexpr int LOGICAL_HEIGHT = 240;
+constexpr int WINDOW_SCALE_MAX = 6;
+
+// Largest whole multiple of the logical size that fits the display, so the window
+// really is 4:3 and the picture fills it exactly with no letterboxing.
+void pick_window_size(int& width, int& height) {
+    width = LOGICAL_WIDTH * 3;
+    height = LOGICAL_HEIGHT * 3;
+    SDL_Rect usable{};
+    if (SDL_GetDisplayUsableBounds(0, &usable) != 0 || usable.w <= 0 || usable.h <= 0) {
+        return;
+    }
+    int scale = std::min(usable.w / LOGICAL_WIDTH, usable.h / LOGICAL_HEIGHT);
+    scale = std::clamp(scale, 1, WINDOW_SCALE_MAX);
+    width = LOGICAL_WIDTH * scale;
+    height = LOGICAL_HEIGHT * scale;
+}
 // The DOS game reprograms the PIT to 180.02 Hz (divisor 0x19E4) and ticks the
 // game/physics clock once every 5 interrupts -> ~36 Hz. Matching that rate is
 // essential: at the old 70 Hz the whole game ran ~1.94x too fast (and jumps felt
@@ -253,13 +267,20 @@ int run(const std::string& source_root) {
         return 1;
     }
 
+    // Keep the upscale hard-edged; this is a 320x200 paletted game.
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+
+    int window_width = 0, window_height = 0;
+    pick_window_size(window_width, window_height);
     SDL_Window* window =
         SDL_CreateWindow("SkyRoads Native", SDL_WINDOWPOS_CENTERED,
-                         SDL_WINDOWPOS_CENTERED, WINDOW_WIDTH, WINDOW_HEIGHT,
+                         SDL_WINDOWPOS_CENTERED, window_width, window_height,
                          SDL_WINDOW_RESIZABLE);
     SDL_Renderer* presenter =
         SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     SDL_RenderSetLogicalSize(presenter, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+    // Whole-pixel scaling only, so a resized window letterboxes rather than blurring.
+    SDL_RenderSetIntegerScale(presenter, SDL_TRUE);
     SDL_Texture* texture =
         SDL_CreateTexture(presenter, SDL_PIXELFORMAT_RGBA32,
                           SDL_TEXTUREACCESS_STREAMING, 320, 200);

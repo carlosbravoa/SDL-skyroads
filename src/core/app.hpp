@@ -254,7 +254,7 @@ private:
     void emit_empty_tank_alarm(std::vector<AudioCommand>& audio);
     void start_demo(std::vector<AudioCommand>& audio);
     void restart_intro(std::vector<AudioCommand>& audio);
-    void start_gameplay(std::vector<AudioCommand>& audio);
+    void start_gameplay(std::vector<AudioCommand>& audio, bool switch_song);
     void enter_select(std::vector<AudioCommand>& audio, bool switch_song);
     void enter_main_menu(std::vector<AudioCommand>& audio);
     void return_to_menu(std::vector<AudioCommand>& audio);

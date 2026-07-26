@@ -352,6 +352,45 @@ static void test_dos_font_table() {
     CHECK_EQ(skyroads::core::dos_text_centered_x(7), 132);
 }
 
+// Dying replays the same road via @0x339, which is inside the road loop and past the
+// random song pick at @0x296-0x2cc -- so the track keeps playing across every retry
+// and only changes when you go back to the level select and start a road again.
+static void test_app_track_survives_death(const RoadsArchive& roads,
+                                          const DemoRecording& demo) {
+    AttractModeApp app = make_app(roads, demo);
+    app.tick(AppInput{});
+    app.tick(key(&AppInput::space));
+    app.tick(key(&AppInput::enter));
+    AppTickResult start = app.tick(key(&AppInput::enter));
+    CHECK_TRUE(start.mode == AppMode::Gameplay);
+    CHECK_EQ(start.audio_commands,
+             (std::vector<AudioCommand>{AudioCommand::play_song(2)}));
+
+    // Kill the ship and run out the death dwell: not one song command may appear.
+    app.gameplay_session().ship.state = ShipState::Exploded;
+    bool restarted = false;
+    for (int i = 0; i < 200 && !restarted; ++i) {
+        AppTickResult t = app.tick(AppInput{});
+        for (const AudioCommand& c : t.audio_commands) {
+            CHECK_TRUE(c.kind != AudioCommandKind::PlaySong);
+        }
+        if (i > 0 && app.gameplay_session().ship.state == ShipState::Alive) {
+            restarted = true;
+        }
+    }
+    CHECK_TRUE(restarted);
+
+    // Going back to the level select puts the menu song on, and the next road picks
+    // the following track.
+    AppTickResult back = app.tick(key(&AppInput::escape));
+    CHECK_TRUE(back.mode == AppMode::GoMenu);
+    CHECK_EQ(back.audio_commands,
+             (std::vector<AudioCommand>{AudioCommand::play_song(1)}));
+    AppTickResult again = app.tick(key(&AppInput::enter));
+    CHECK_EQ(again.audio_commands,
+             (std::vector<AudioCommand>{AudioCommand::play_song(3)}));
+}
+
 static void test_app_settings_menu(const RoadsArchive& roads,
                                    const DemoRecording& demo) {
     AttractModeApp app = make_app(roads, demo);
@@ -614,6 +653,7 @@ CHECK_MAIN_BEGIN()
     test_app_intro_runs_into_demo(roads, demo);
     test_app_menu_has_no_idle_demo(roads, demo);
     test_app_road_end_flyoff(roads, demo);
+    test_app_track_survives_death(roads, demo);
     test_dos_font_table();
     test_app_settings_menu(roads, demo);
     test_app_empty_tank_alarm(roads, demo);

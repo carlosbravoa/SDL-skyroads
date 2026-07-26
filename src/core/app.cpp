@@ -402,7 +402,7 @@ void AttractModeApp::tick_go_menu(AppInput input, std::vector<AudioCommand>& aud
 
     if (input.enter) {
         current_level_index_ = selected_road_index();
-        start_gameplay(audio);
+        start_gameplay(audio, true);
     }
 }
 
@@ -457,7 +457,8 @@ void AttractModeApp::tick_gameplay(AppInput input,
     // ever showing the menu. Only completing it (outcome 0) bumps that road's
     // completion count, steps the cursor to the next entry, and returns to the menu.
     if (gameplay_session_.ship.state != ShipState::Alive) {
-        start_gameplay(audio); // died -> immediately retry the same road
+        // Retry the same road, keeping the track that is already playing.
+        start_gameplay(audio, false);
         return;
     }
 
@@ -561,7 +562,12 @@ void AttractModeApp::restart_intro(std::vector<AudioCommand>& audio) {
     audio.push_back(AudioCommand::play_song(INTRO_SONG_INDEX));
 }
 
-void AttractModeApp::start_gameplay(std::vector<AudioCommand>& audio) {
+// `switch_song` mirrors where the EXE enters the road loop. Coming from the level
+// select it falls through @0x296-0x2cc, which picks a random gameplay track; a death
+// instead jumps to 0x339, which is INSIDE the loop and past that pick -- so the track
+// carries on across every retry and only changes when you go back to the level select.
+void AttractModeApp::start_gameplay(std::vector<AudioCommand>& audio,
+                                    bool switch_song) {
     mode_ = AppMode::Gameplay;
     menu_idle_tick_ = 0;
     was_gameover_ = false;
@@ -581,7 +587,9 @@ void AttractModeApp::start_gameplay(std::vector<AudioCommand>& audio) {
             completed == GO_MENU_ENTRIES - 1;
     }
     gameplay_session_ = GameplaySession(levels_[current_level_index_]);
-    audio.push_back(AudioCommand::play_song(next_gameplay_song()));
+    if (switch_song) {
+        audio.push_back(AudioCommand::play_song(next_gameplay_song()));
+    }
 }
 
 void AttractModeApp::enter_main_menu(std::vector<AudioCommand>& audio) {
