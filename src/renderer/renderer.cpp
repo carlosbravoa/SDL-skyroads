@@ -37,6 +37,24 @@ constexpr std::size_t VIEW_BOTTOM_Y = DASHBOARD_TOP;
 constexpr std::size_t SHIP_SCALE = 1;
 // intro.lzs picture 1 is the SKYROADS title (320x54 at y = 32).
 constexpr std::size_t INTRO_TITLE_FRAME = 1;
+
+// Gauge levels, straight out of the HUD update.
+// Fuel and oxygen: a full tank is 0x7530 and the bar has ten segments, so the level
+// is `(remaining + 0xBB7) / 0xBB8` capped at ten (@0x130a-0x1323, @0x13f3-0x140c) --
+// any non-empty fraction of a segment lights it.
+std::size_t tank_gauge_level(double remaining_fraction) {
+    const int64_t remaining = static_cast<int64_t>(
+        std::lround(std::clamp(remaining_fraction, 0.0, 1.0) * 0x7530));
+    return static_cast<std::size_t>(std::min<int64_t>((remaining + 0xBB7) / 0xBB8, 10));
+}
+
+// Speed: the 34-segment ring is `z_velocity / 0x141` capped at 34 (@0x127d-0x1296),
+// computed on the raw 1/65536 velocity.
+std::size_t speed_gauge_level(double z_velocity) {
+    const int64_t raw = static_cast<int64_t>(std::lround(z_velocity * 65536.0));
+    if (raw <= 0) return 0;
+    return static_cast<std::size_t>(std::min<int64_t>(raw / 0x141, 34));
+}
 constexpr int32_t SHIP_SCREEN_X = 160;
 constexpr int32_t SHIP_SCREEN_Y = 84;
 constexpr int32_t DEBUG_PANEL_X = 8;
@@ -204,15 +222,22 @@ RgbColor dos_shape_color(LevelCell cell, uint8_t color_code) {
 }
 
 void draw_trekdat_span(FrameBuffer320x200& frame, int32_t x, int32_t y,
-                       int32_t width, RgbColor color) {
+                       int32_t width, RgbColor color, uint8_t shade) {
     if (y < static_cast<int32_t>(HORIZON_Y) || y >= static_cast<int32_t>(VIEW_BOTTOM_Y)) {
         return;
     }
-    frame.fill_rect(x, y, width, 1, color);
+    // Record the shade as well as the colour: the ship's shadow reads the road back
+    // out of the framebuffer and remaps whatever index it finds.
+    const int32_t x0 = std::max(x, 0);
+    const int32_t x1 = std::min(x + width, static_cast<int32_t>(SCREEN_WIDTH));
+    for (int32_t px = x0; px < x1; ++px) {
+        frame.set_pixel(static_cast<std::size_t>(px), static_cast<std::size_t>(y),
+                        color, shade);
+    }
 }
 
 void draw_dos_shape(FrameBuffer320x200& frame, const TrekdatShape& shape,
-                    RgbColor color, DosRenderSide side) {
+                    RgbColor color, DosRenderSide side, uint8_t shade) {
     for (const auto& span : shape.spans) {
         if (span.width == 0) continue;
         int32_t x;
@@ -223,7 +248,7 @@ void draw_dos_shape(FrameBuffer320x200& frame, const TrekdatShape& shape,
                 static_cast<int32_t>(span.width);
         }
         draw_trekdat_span(frame, x, static_cast<int32_t>(span.y),
-                          static_cast<int32_t>(span.width), color);
+                          static_cast<int32_t>(span.width), color, shade);
     }
 }
 
@@ -521,6 +546,10 @@ DerivedShipVisualState derive_ship_visual_state(const DemoPlaybackState& scene) 
     v.support_y = scene.ship.support_y;
     v.on_surface = scene.ship.is_on_ground && scene.ship.state == ShipState::Alive;
     v.casts_shadow = scene.ship.state == ShipState::Alive;
+    // ds:0xe40 (@0xd71-0xda4): the ship's height above the surface holding it up, in
+    // whole world units. scene_draw divides it by five to choose the silhouette.
+    v.hover_units = static_cast<int32_t>(
+        std::floor(scene.ship.y_position - scene.ship.support_y));
     return v;
 }
 
@@ -558,8 +587,12 @@ ShipScreenPlacement ship_screen_placement_from_slices(
     const int32_t surface_offset_y =
         static_cast<int32_t>(std::lround(-(visual.support_y - GROUND_Y)));
     const int32_t shadow_center_y = SHIP_SCREEN_Y + 18 + surface_offset_y;
-    return ShipScreenPlacement{center_x, sprite_center_y, center_x,
-                               shadow_center_y};
+    // Blit corner, exactly as the DOS ship blit computes it.
+    const int32_t sprite_left_x =
+        static_cast<int32_t>(std::lround(scene.ship.x_position)) + lane_adj[lane] - 110;
+    const int32_t sprite_top_y = sprite_center_y - 12;
+    return ShipScreenPlacement{center_x,        sprite_center_y, center_x,
+                               shadow_center_y, sprite_left_x,   sprite_top_y};
 }
 
 ShipScreenPlacement ship_screen_placement(const DemoPlaybackState& scene,
@@ -903,8 +936,9 @@ bool PrimitiveCursor::emit(FrameBuffer320x200& frame, const TrekdatRecord& recor
     next_offset = record.next_shape_offset(offset);
     if (shape->span_count == 0) return true;
     const uint8_t shade = override_color_code ? *override_color_code : shape->color;
-    const RgbColor color = dos_shape_color(cell, dos_shade_to_palette(shade, side));
-    draw_dos_shape(frame, *shape, color, side);
+    const uint8_t palette_index = dos_shade_to_palette(shade, side);
+    const RgbColor color = dos_shape_color(cell, palette_index);
+    draw_dos_shape(frame, *shape, color, side, palette_index);
     return true;
 }
 } // namespace
@@ -914,7 +948,8 @@ bool PrimitiveCursor::emit(FrameBuffer320x200& frame, const TrekdatRecord& recor
 FrameBuffer320x200::FrameBuffer320x200()
     : width(SCREEN_WIDTH),
       height(SCREEN_HEIGHT),
-      pixels_rgba(FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT * 4, 0) {}
+      pixels_rgba(FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT * 4, 0),
+      shade_plane(FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT, 0) {}
 
 void FrameBuffer320x200::clear(RgbColor color) {
     for (std::size_t i = 0; i < pixels_rgba.size(); i += 4) {
@@ -923,6 +958,7 @@ void FrameBuffer320x200::clear(RgbColor color) {
         pixels_rgba[i + 2] = color.b;
         pixels_rgba[i + 3] = 255;
     }
+    std::fill(shade_plane.begin(), shade_plane.end(), uint8_t{0});
 }
 
 void FrameBuffer320x200::fill_rect(int32_t x, int32_t y, int32_t w, int32_t h,
@@ -947,6 +983,18 @@ void FrameBuffer320x200::set_pixel(std::size_t x, std::size_t y, RgbColor color)
     pixels_rgba[offset + 1] = color.g;
     pixels_rgba[offset + 2] = color.b;
     pixels_rgba[offset + 3] = 255;
+}
+
+void FrameBuffer320x200::set_pixel(std::size_t x, std::size_t y, RgbColor color,
+                                   uint8_t shade) {
+    if (x >= FRAMEBUFFER_WIDTH || y >= FRAMEBUFFER_HEIGHT) return;
+    set_pixel(x, y, color);
+    shade_plane[y * FRAMEBUFFER_WIDTH + x] = shade;
+}
+
+uint8_t FrameBuffer320x200::shade_at(std::size_t x, std::size_t y) const {
+    if (x >= FRAMEBUFFER_WIDTH || y >= FRAMEBUFFER_HEIGHT) return 0;
+    return shade_plane[y * FRAMEBUFFER_WIDTH + x];
 }
 
 void FrameBuffer320x200::blend_pixel(std::size_t x, std::size_t y, RgbColor color,
@@ -1154,7 +1202,6 @@ void ReferenceRenderer::render_main_menu(FrameBuffer320x200& frame,
     draw_archive_frame(frame, assets_.intro, 1, 1.0f, 1.0f);
     draw_archive_frame(frame, assets_.main_menu,
                        skyroads::core::menu_cursor_index(scene.selected), 1.0f, 1.0f);
-    draw_branding(frame, 184, 2, 1.0f);
 }
 
 void ReferenceRenderer::render_help_menu(FrameBuffer320x200& frame,
@@ -1228,14 +1275,19 @@ void ReferenceRenderer::render_play_scene(FrameBuffer320x200& frame,
 
     const bool drew_dos_road = draw_demo_rows_before_ship(frame, scene);
     if (!drew_dos_road) draw_demo_rows_fallback(frame, scene);
-    draw_ship_shadow(frame, ship_visual, ship_placement);
+    // The shadow is blitted straight AFTER the ship (@0x329d), not before it.
     draw_ship_sprite(frame, scene.frame_index, ship_visual, ship_placement);
+    draw_ship_shadow(frame, ship_visual, ship_placement);
     if (drew_dos_road) draw_demo_rows_after_ship(frame, scene);
     draw_archive_frame(frame, assets_.dashboard, 0, 1.0f, 1.0f);
-    draw_gauge(frame, assets_.oxygen_gauge, scene.snapshot.oxygen_percent);
-    draw_gauge(frame, assets_.fuel_gauge, scene.snapshot.fuel_percent);
-    const double speed = scene.snapshot.z_velocity / (0x2AAA / 65536.0);
-    draw_gauge(frame, assets_.speed_gauge, speed);
+    draw_gauge(frame, assets_.oxygen_gauge, tank_gauge_level(scene.snapshot.oxygen_percent));
+    draw_gauge(frame, assets_.fuel_gauge, tank_gauge_level(scene.snapshot.fuel_percent));
+    draw_gauge(frame, assets_.speed_gauge, speed_gauge_level(scene.snapshot.z_velocity));
+    draw_dashboard_number(frame, skyroads::core::DOS_GRAVITY_READOUT_X,
+                          skyroads::core::DOS_GRAVITY_READOUT_Y,
+                          skyroads::core::dos_gravity_readout(
+                              static_cast<int32_t>(scene.gravity)),
+                          skyroads::core::DOS_GRAVITY_READOUT_DIGITS);
     // Completing a road is the ONLY outcome the original puts a message up for
     // (EXE @0x2c5a skips the whole banner unless the outcome is 0): it prints "Road
     // Completed", or "The End" on the last remaining road, at y=80. Dying shows
@@ -1311,24 +1363,85 @@ void ReferenceRenderer::draw_ship_sprite(FrameBuffer320x200& frame,
     draw_sprite(frame, sprite, x, y, SHIP_SCALE);
 }
 
+// The gauges are SEGMENTED BARS, not one picture that changes shape: each *_DISP.DAT
+// fragment is a single segment, and the game paints segments below the current level
+// in the "lit" colour pair and the rest in the "unlit" pair (@0x1341-0x138e, pairs
+// chosen at @0xeef-0xf15). It only redraws the segments between the old and new
+// level, which over a full redraw comes out as painting them all.
+//
+// The colours are palette indices 0x5C..0x5F, and dashbrd.lzs is loaded at palette
+// base 0x5C (@0x5589), so they are just the first four colours of its own CMAP:
+// 0/1 unlit, 2/3 lit. A mask byte of 1 selects the first of a pair, anything else
+// the second.
 void ReferenceRenderer::draw_gauge(FrameBuffer320x200& frame,
-                                   const HudFragmentPack& pack, double amount) const {
+                                   const HudFragmentPack& pack,
+                                   std::size_t level) const {
     if (pack.fragments.empty()) return;
-    const double clamped = std::clamp(amount, 0.0, 1.0);
-    const int64_t rounded =
-        static_cast<int64_t>(std::round(clamped * static_cast<double>(pack.fragments.size())));
-    const int64_t idx = std::clamp<int64_t>(
-        rounded - 1, 0, static_cast<int64_t>(pack.fragments.size()) - 1);
-    const auto& fragment = pack.fragments[static_cast<std::size_t>(idx)];
-    for (std::size_t y = 0; y < fragment.height; ++y) {
-        for (std::size_t x = 0; x < fragment.width; ++x) {
-            const uint8_t pixel_index = fragment.pixels[y * fragment.width + x];
-            if (pixel_index == 0) continue;
-            const std::size_t color_index = std::min<uint8_t>(pixel_index, 2);
-            frame.set_pixel(static_cast<std::size_t>(fragment.x) + x,
-                            static_cast<std::size_t>(fragment.y) + y,
-                            dashboard_colors()[color_index]);
+    const std::vector<RgbColor>* palette = nullptr;
+    if (!assets_.dashboard.frames.empty() && !assets_.dashboard.frames[0].empty()) {
+        palette = &assets_.dashboard.frames[0].front().palette.colors;
+    }
+    auto pair_color = [&](bool lit, uint8_t mask_value) -> RgbColor {
+        const std::size_t index = (lit ? 2u : 0u) + (mask_value == 1 ? 0u : 1u);
+        if (palette != nullptr && index < palette->size()) return (*palette)[index];
+        return dashboard_colors()[std::min<std::size_t>(index, std::size_t{2})];
+    };
+
+    for (std::size_t segment = 0; segment < pack.fragments.size(); ++segment) {
+        const auto& fragment = pack.fragments[segment];
+        const bool lit = segment < level;
+        for (std::size_t y = 0; y < fragment.height; ++y) {
+            for (std::size_t x = 0; x < fragment.width; ++x) {
+                const uint8_t mask_value = fragment.pixels[y * fragment.width + x];
+                if (mask_value == 0) continue;
+                frame.set_pixel(static_cast<std::size_t>(fragment.x) + x,
+                                static_cast<std::size_t>(fragment.y) + y,
+                                pair_color(lit, mask_value));
+            }
         }
+    }
+}
+
+// The GRAV-O-METER readout (@0x1067). Digits are emitted from the units upward and
+// the loop stops as soon as the remaining value is zero, so leading zeros are simply
+// never drawn; digit `i` from the right sits at x + (count - 1 - i) * 5.
+void ReferenceRenderer::draw_dashboard_number(FrameBuffer320x200& frame, int32_t x,
+                                              int32_t y, int32_t value,
+                                              std::size_t digits) const {
+    if (value < 0) return;
+    const std::vector<RgbColor>* palette = nullptr;
+    if (!assets_.dashboard.frames.empty() && !assets_.dashboard.frames[0].empty()) {
+        palette = &assets_.dashboard.frames[0].front().palette.colors;
+    }
+    // Glyph byte 0 is the digit stroke (palette index 0), 1 and 2 the two tan shades
+    // of the readout window (dashbrd CMAP entries 5 and 6).
+    auto glyph_color = [&](uint8_t v) -> RgbColor {
+        const std::size_t index = v == 0 ? 0u : (v == 1 ? 5u : 6u);
+        if (palette != nullptr && index < palette->size()) return (*palette)[index];
+        return RgbColor(0, 0, 0);
+    };
+
+    int32_t remaining = value;
+    int32_t divisor = 1;
+    for (std::size_t i = 0; i < digits; ++i) {
+        if (remaining == 0 && i != 0) break;
+        const int32_t digit = (remaining / divisor) % 10;
+        const auto& glyph =
+            skyroads::core::DOS_DIGIT_GLYPHS[static_cast<std::size_t>(digit)];
+        const int32_t gx = x + static_cast<int32_t>(digits - 1 - i) *
+                                   skyroads::core::DOS_DIGIT_ADVANCE;
+        for (std::size_t row = 0; row < skyroads::core::DOS_DIGIT_HEIGHT; ++row) {
+            for (std::size_t col = 0; col < skyroads::core::DOS_DIGIT_WIDTH; ++col) {
+                const int32_t px = gx + static_cast<int32_t>(col);
+                const int32_t py = y + static_cast<int32_t>(row);
+                if (px < 0 || py < 0) continue;
+                frame.set_pixel(
+                    static_cast<std::size_t>(px), static_cast<std::size_t>(py),
+                    glyph_color(glyph[row * skyroads::core::DOS_DIGIT_WIDTH + col]));
+            }
+        }
+        remaining -= digit * divisor;
+        divisor *= 10;
     }
 }
 
@@ -1431,8 +1544,11 @@ void ReferenceRenderer::draw_sprite(FrameBuffer320x200& frame,
                     const int32_t px = dest_x + static_cast<int32_t>(x * scale + sx);
                     const int32_t py = dest_y + static_cast<int32_t>(y * scale + sy);
                     if (px < 0 || py < 0) continue;
+                    // Sprites live outside the road's shade range, so mark them as
+                    // "not road" and the shadow will leave them alone.
                     frame.set_pixel(static_cast<std::size_t>(px),
-                                    static_cast<std::size_t>(py), color);
+                                    static_cast<std::size_t>(py), color,
+                                    FrameBuffer320x200::SHADE_NOT_ROAD);
                 }
             }
         }
@@ -1493,42 +1609,46 @@ void ReferenceRenderer::draw_projected_slice(FrameBuffer320x200& frame,
 void ReferenceRenderer::draw_ship_shadow(FrameBuffer320x200& frame,
                                          const DerivedShipVisualState& visual,
                                          ShipScreenPlacement placement) const {
-    // Draw the ground shadow whenever alive (including mid-jump) — the original
-    // keeps it on the ground below the ship. It shrinks with height via `hover`.
+    // EXE @0x33e1, called straight after the ship blit @0x329d. Five pre-drawn 29x9
+    // silhouettes, one per five units of altitude, and none at all above 25. The
+    // blit reads the paletted screen back and remaps the shade it finds rather than
+    // blending anything, so the shadow only ever darkens the road surface.
     if (!visual.casts_shadow) return;
-    const int32_t shadow_center_x = placement.shadow_center_x;
-    const int32_t shadow_center_y = placement.shadow_center_y;
-    // Height above the surface below (not above road level), so a ship resting on a
-    // raised block gets a full-size shadow rather than a shrunken one.
-    const int32_t hover =
-        std::max((shadow_center_y - placement.sprite_center_y) - 13, 0);
-    const int32_t radius_x = std::clamp(9 - hover / 6, 4, 9);
-    const int32_t radius_y = std::clamp(4 - hover / 10, 2, 4);
-    for (int32_t dy = -radius_y; dy <= radius_y; ++dy) {
-        for (int32_t dx = -radius_x; dx <= radius_x; ++dx) {
-            const int32_t ellipse = (dx * dx * 100) / (radius_x * radius_x) +
-                                    (dy * dy * 100) / (radius_y * radius_y);
-            if (ellipse > 100) continue;
-            const int32_t px = shadow_center_x + dx;
-            const int32_t py = shadow_center_y + dy;
-            if (px < 0 || py < static_cast<int32_t>(HORIZON_Y) ||
-                py >= static_cast<int32_t>(VIEW_BOTTOM_Y)) {
-                continue;
-            }
-            frame.blend_pixel(static_cast<std::size_t>(px),
-                              static_cast<std::size_t>(py), RgbColor(0, 0, 0), 0.18f);
+    const int32_t hover = visual.hover_units;
+    const int32_t level = hover / skyroads::core::DOS_SHADOW_STEP;
+    if (level < 0 ||
+        level >= static_cast<int32_t>(skyroads::core::DOS_SHADOW_LEVELS)) {
+        return;
+    }
+    const auto& mask = skyroads::core::DOS_SHIP_SHADOW_MASKS[
+        static_cast<std::size_t>(level)];
+    // Top-left corner: the same column as the ship sprite, and a row pinned to the
+    // surface underneath it (@0x33fe-0x3417).
+    const int32_t left = placement.sprite_left_x;
+    const int32_t top = placement.sprite_top_y + skyroads::core::DOS_SHADOW_Y_OFFSET +
+                        hover;
+
+    for (std::size_t row = 0; row < skyroads::core::DOS_SHADOW_ROWS; ++row) {
+        const int32_t py = top + static_cast<int32_t>(row);
+        if (py < static_cast<int32_t>(HORIZON_Y) ||
+            py >= static_cast<int32_t>(VIEW_BOTTOM_Y)) {
+            continue;
+        }
+        const uint32_t bits = mask[row];
+        for (std::size_t col = 0; col < skyroads::core::DOS_SHADOW_COLUMNS; ++col) {
+            if ((bits & (1u << col)) == 0) continue;
+            const int32_t px = left + static_cast<int32_t>(col);
+            if (px < 0 || px >= static_cast<int32_t>(SCREEN_WIDTH)) continue;
+            const uint8_t shade =
+                frame.shade_at(static_cast<std::size_t>(px), static_cast<std::size_t>(py));
+            const uint8_t shaded = skyroads::core::dos_shadow_shade(shade);
+            if (shaded == shade) continue; // sky, sprite or an already-dark band
+            frame.set_pixel(static_cast<std::size_t>(px), static_cast<std::size_t>(py),
+                            dos_shape_color(LevelCell::empty(), shaded), shaded);
         }
     }
 }
 
-void ReferenceRenderer::draw_branding(FrameBuffer320x200& frame, int32_t y,
-                                      std::size_t scale, float alpha) const {
-    const std::string text = "SKYROADS NATIVE SDL PORT";
-    const RgbColor color = scale_brightness(RgbColor(245, 214, 109), alpha);
-    const RgbColor shadow = scale_brightness(RgbColor(54, 24, 70), alpha);
-    draw_text_centered(frame, text, y + static_cast<int32_t>(scale), shadow, scale);
-    draw_text_centered(frame, text, y, color, scale);
-}
 
 void ReferenceRenderer::draw_text_centered(FrameBuffer320x200& frame,
                                            const std::string& text, int32_t y,
@@ -1594,8 +1714,8 @@ void ReferenceRenderer::render_play_geometry_debug(FrameBuffer320x200& frame,
                     static_cast<int32_t>(VIEW_BOTTOM_Y - HORIZON_Y), RgbColor(10, 10, 20));
     for (const auto& slice : slices) draw_projected_slice(frame, slice);
     draw_projected_slice_guides(frame, slices);
-    draw_ship_shadow(frame, visual, placement);
     draw_ship_sprite(frame, scene.frame_index, visual, placement);
+    draw_ship_shadow(frame, visual, placement);
     draw_ship_debug_guides(frame, scene, visual, placement);
     draw_topdown_inset(frame, scene);
     draw_archive_frame(frame, assets_.dashboard, 0, 1.0f, 1.0f);

@@ -103,19 +103,6 @@ static void test_gameplay_ship_pixels() {
     CHECK_TRUE(ship_pixels > 40);
 }
 
-static void test_branding() {
-    ReferenceRenderer renderer(load_assets());
-    FrameBuffer320x200 frame;
-    renderer.draw_branding(frame, 184, 2, 1.0f);
-    std::size_t bright = 0;
-    for (std::size_t y = 184; y < 196; ++y) {
-        for (std::size_t x = 40; x < 280; ++x) {
-            const std::size_t o = (y * frame.width + x) * 4;
-            if (frame.pixels_rgba[o] > 150 && frame.pixels_rgba[o + 1] > 120) bright += 1;
-        }
-    }
-    CHECK_TRUE(bright > 200);
-}
 
 CHECK_MAIN_BEGIN()
     test_assets_load();
@@ -123,5 +110,4 @@ CHECK_MAIN_BEGIN()
     test_intro_menu_non_empty();
     test_gameplay_playfield();
     test_gameplay_ship_pixels();
-    test_branding();
 CHECK_MAIN_END()

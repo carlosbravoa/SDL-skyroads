@@ -57,6 +57,77 @@ inline constexpr std::array<uint8_t, DOS_SHADE_LUT_SIZE> DOS_SHADE_LUT_REVERSE =
     0x00, 0x3D, 0x3E, 0x40, 0x00, 0x41, 0x42, 0x43, 0x46, 0x45, 0x44, 0x45,
     0x46, 0x47};
 
+// DS:0x065E — the ship's ground shadow, five pre-drawn silhouettes of 29x9 pixels
+// picked by how far the ship is above the surface below it. The linear renderer
+// @0x33e1 computes `level = hover / 5` and draws nothing at all once that reaches 5,
+// so the shadow disappears above 25 units of altitude.
+//
+// It is not a translucent blob: the blit at @0x3437-0x344a READS the screen pixel and
+// remaps its palette index -- 0x3D becomes 0x40, index 0 (sky) is left alone, indices
+// below 0x10 (the road's top-surface shades) gain 0x2D, and anything else is
+// untouched. So the shadow simply moves the road surface into the same darker
+// 0x2E..0x3C band that the mirrored half of the road already uses, and can never fall
+// on the sky or on a wall.
+//
+// One bit per pixel, bit 0 = leftmost column.
+inline constexpr std::size_t DOS_SHADOW_LEVELS = 5;
+inline constexpr std::size_t DOS_SHADOW_ROWS = 9;
+inline constexpr std::size_t DOS_SHADOW_COLUMNS = 29;
+// hover / DOS_SHADOW_STEP selects the level; >= DOS_SHADOW_LEVELS means no shadow.
+inline constexpr int32_t DOS_SHADOW_STEP = 5;
+// Screen row of the shadow's top = (157 - ship_y) + DOS_SHADOW_Y_OFFSET + hover,
+// which pins it to the surface the ship is flying over (@0x33fe-0x3408).
+inline constexpr int32_t DOS_SHADOW_Y_OFFSET = 16;
+inline constexpr std::array<std::array<uint32_t, DOS_SHADOW_ROWS>, DOS_SHADOW_LEVELS>
+    DOS_SHIP_SHADOW_MASKS = {{
+        {0x0007FE00u, 0x001FFF80u, 0x003FFFC0u, 0x003FFFC0u, 0x001FFF80u, 0x00FFFFF0u,
+         0x03FFFFFCu, 0x07FBFEFEu, 0x03F1FC7Cu},
+        {0x00000000u, 0x0001F800u, 0x001FFF80u, 0x003FFFC0u, 0x001FFF80u, 0x00FFFFF0u,
+         0x00FFFFF0u, 0x007DFDE0u, 0x00000000u},
+        {0x00000000u, 0x00000000u, 0x0003FC00u, 0x000FFF00u, 0x0007FE00u, 0x003FFFC0u,
+         0x001EFB80u, 0x00000000u, 0x00000000u},
+        {0x00000000u, 0x00000000u, 0x00000000u, 0x0003FC00u, 0x0007FE00u, 0x000F7700u,
+         0x00000000u, 0x00000000u, 0x00000000u},
+        {0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x0001F800u, 0x0003AC00u,
+         0x00000000u, 0x00000000u, 0x00000000u},
+    }};
+
+// The shadow's palette remap, straight from @0x343a-0x3448.
+inline uint8_t dos_shadow_shade(uint8_t shade) {
+    if (shade == 0x3D) return 0x40;
+    if (shade == 0x00) return 0x00; // sky: never shadowed
+    if (shade < 0x10) return static_cast<uint8_t>(shade + 0x2D);
+    return shade;
+}
+
+// DS:0x013C — the dashboard's 4x5 digit glyphs, 20 bytes each, drawn by 0xfc6 via
+// the expander @0xeb5: byte 0 becomes palette index 0 (black, the digit strokes) and
+// bytes 1 and 2 become 0x61 and 0x62, the two tan shades of the readout window.
+// dashbrd.lzs is loaded at palette base 0x5C, so those are its CMAP entries 5 and 6.
+inline constexpr std::size_t DOS_DIGIT_WIDTH = 4;
+inline constexpr std::size_t DOS_DIGIT_HEIGHT = 5;
+// Successive digits sit five pixels apart (@0x10c1) with the units digit rightmost.
+inline constexpr int32_t DOS_DIGIT_ADVANCE = 5;
+inline constexpr std::array<std::array<uint8_t, 20>, 10> DOS_DIGIT_GLYPHS = {{
+    {0, 0, 0, 0, 0, 2, 2, 0, 0, 1, 1, 0, 0, 2, 2, 0, 0, 0, 0, 0},
+    {1, 1, 1, 0, 1, 2, 2, 0, 1, 1, 1, 0, 1, 2, 2, 0, 1, 1, 1, 0},
+    {0, 0, 0, 0, 1, 2, 2, 0, 0, 0, 0, 0, 0, 2, 2, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 2, 0, 0, 0, 0, 0, 1, 2, 2, 0, 0, 0, 0, 0},
+    {0, 1, 1, 0, 0, 2, 2, 0, 0, 0, 0, 0, 1, 2, 2, 0, 1, 1, 1, 0},
+    {0, 0, 0, 0, 0, 2, 2, 1, 0, 0, 0, 0, 1, 2, 2, 0, 0, 0, 0, 0},
+    {0, 1, 1, 1, 0, 2, 2, 1, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 2, 2, 0, 1, 1, 1, 0, 1, 2, 2, 0, 1, 1, 1, 0},
+    {0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 2, 2, 0, 0, 0, 0, 0, 1, 2, 2, 0, 1, 1, 1, 0},
+}};
+
+// The GRAV-O-METER readout: `(gravity - 3) * 100`, four digits, at (96, 156)
+// (@0x2ba7-0x2bba). Gravity 8 -- every shipped road -- therefore shows "500".
+inline constexpr int32_t DOS_GRAVITY_READOUT_X = 96;
+inline constexpr int32_t DOS_GRAVITY_READOUT_Y = 156;
+inline constexpr std::size_t DOS_GRAVITY_READOUT_DIGITS = 4;
+inline int32_t dos_gravity_readout(int32_t gravity) { return (gravity - 3) * 100; }
+
 // Replaces skyroads::data::ExeDispatchEntry in the planner so nothing in the
 // runtime path names the executable.
 struct DispatchEntry {
