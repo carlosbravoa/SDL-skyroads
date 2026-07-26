@@ -407,18 +407,21 @@ void Ship::handle_bounce(const Ship& expected, const Level& level) {
 }
 
 void Ship::handle_oxygen_and_fuel(const Level& level) {
+    // Oxygen burns on TIME (a fixed slice of the tank every tick) and fuel burns on
+    // DISTANCE (proportional to forward speed), so a stationary ship still suffocates
+    // but uses no fuel.
     oxygen_remaining -=
         0x7530 / (0x24 * static_cast<double>(level.oxygen));
-    if (oxygen_remaining <= 0.0) {
-        oxygen_remaining = 0.0;
-        state = ShipState::OutOfOxygen;
-    }
+    if (oxygen_remaining <= 0.0) oxygen_remaining = 0.0;
 
     fuel_remaining -= z_velocity * 0x7530 / static_cast<double>(level.fuel);
-    if (fuel_remaining <= 0.0) {
-        fuel_remaining = 0.0;
-        state = ShipState::OutOfFuel;
-    }
+    if (fuel_remaining <= 0.0) fuel_remaining = 0.0;
+
+    // The EXE assigns the outcome unconditionally in the order fuel then oxygen
+    // (@0x2ab0, @0x2ac0), so when both empty on the same tick OXYGEN is the one that
+    // sticks. Keep that order; it decides which dashboard label flashes.
+    if (fuel_remaining <= 0.0) state = ShipState::OutOfFuel;
+    if (oxygen_remaining <= 0.0) state = ShipState::OutOfOxygen;
 }
 
 void Ship::handle_fall_below_ground() {
