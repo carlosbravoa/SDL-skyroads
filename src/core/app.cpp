@@ -573,7 +573,7 @@ void AttractModeApp::start_gameplay(std::vector<AudioCommand>& audio) {
     {
         const std::size_t flat = go_menu_flat_index(selected_world_, selected_level_);
         std::size_t completed = 0;
-        for (uint8_t c : road_completions_) {
+        for (uint16_t c : road_completions_) {
             if (c != 0) completed += 1;
         }
         current_road_is_final_ =
