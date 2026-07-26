@@ -477,8 +477,12 @@ void AttractModeApp::tick_gameplay(AppInput input,
             gameplay_session_.ship.y_position = 0.0;
             const std::size_t flat =
                 go_menu_flat_index(selected_world_, selected_level_);
-            if (flat < road_completions_.size() && road_completions_[flat] < 255) {
-                road_completions_[flat] += 1;
+            // @0x39c is a plain `add WORD PTR [bx], 1` -- a 16-bit counter with no
+            // ceiling, so it simply wraps. Nothing reads the magnitude beyond the
+            // seven-marker cap in the level select.
+            if (flat < road_completions_.size()) {
+                road_completions_[flat] = static_cast<uint16_t>(
+                    road_completions_[flat] + 1);
             }
         }
         if (road_end_ticks_ < ROAD_END_FLYOFF_TICKS && !input.escape) {

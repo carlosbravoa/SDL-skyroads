@@ -176,8 +176,9 @@ struct GoMenuScene {
     std::size_t world_count;
     std::size_t road_index; // resolved road (1..30)
     // Times each of the 30 roads has been completed, indexed by the menu's flat
-    // index (column * 15 + world_row * 3 + road).
-    std::array<uint8_t, 30> completions{};
+    // index (column * 15 + world_row * 3 + road). ds:0x452a is a 30-WORD array, and
+    // the level select draws min(count, 7) markers.
+    std::array<uint16_t, 30> completions{};
     uint16_t gravity;
     uint16_t fuel;
     uint16_t oxygen;
@@ -222,7 +223,7 @@ public:
     DemoPlaybackState current_demo_scene() const;
     GoMenuScene current_go_menu_scene() const;
     // Per-road completion counts, so the host can persist them to skyroads.cfg.
-    const std::array<uint8_t, 30>& road_completions() const { return road_completions_; }
+    const std::array<uint16_t, 30>& road_completions() const { return road_completions_; }
     // The two settings words the original keeps in skyroads.cfg: ds:0x4526 is the
     // input device and ds:0x4528 the sound option (non-zero silences the music).
     std::size_t input_device() const { return input_device_; }
@@ -237,7 +238,7 @@ public:
     void set_intro_anim_group_count(std::size_t count) {
         intro_anim_group_count_ = count;
     }
-    void set_road_completions(const std::array<uint8_t, 30>& counts) {
+    void set_road_completions(const std::array<uint16_t, 30>& counts) {
         road_completions_ = counts;
     }
 
@@ -282,7 +283,7 @@ private:
     std::size_t selected_level_;
     // Per-road completion counts (the EXE's ds:0x452a, 30 words), shown in the level
     // select as a row of small markers next to each road.
-    std::array<uint8_t, 30> road_completions_{};
+    std::array<uint16_t, 30> road_completions_{};
     bool was_gameover_;
     bool awaiting_advance_release_;
     // Ticks the "Road Completed" banner has been on screen, and whether the road

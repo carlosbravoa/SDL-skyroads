@@ -220,12 +220,9 @@ int run(const std::string& source_root) {
     const std::string config_path = source_root + "/skyroads.cfg";
     data::GameConfig config = data::load_game_config(config_path);
     {
-        std::array<uint8_t, 30> counts{};
-        for (std::size_t i = 0; i < counts.size(); ++i) {
-            counts[i] = static_cast<uint8_t>(std::min<uint16_t>(
-                config.road_completions[i], 255));
-        }
-        app.set_road_completions(counts);
+        // The counts are 16-bit words in the file and in the game, so they survive a
+        // load/save round trip untouched.
+        app.set_road_completions(config.road_completions);
         // The two setting words are the input device and the sound option, and the
         // original really does act on them at startup: a non-zero sound option means
         // the song loader never plays anything (@0x57bd).
