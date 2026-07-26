@@ -55,9 +55,14 @@ constexpr uint64_t SIMULATION_HZ_DEFAULT = 36;
 constexpr uint64_t SIMULATION_HZ_MIN = 12;
 constexpr uint64_t SIMULATION_HZ_MAX = 120;
 constexpr int MAX_CATCH_UP_STEPS = 4;
+// Audio latency: the device buffer plus whatever is sitting in the queue. The queue
+// used to be topped up to 4096 samples, which at 48 kHz is 85 ms of sound waiting to
+// play -- so a menu beep or a jump landed noticeably after the keypress and read as
+// input lag. Halved, which still leaves two device buffers of slack against underrun.
+// Raise these two if a slower machine crackles.
 constexpr uint16_t AUDIO_DEVICE_BUFFER_SAMPLES = 1024;
-constexpr std::size_t AUDIO_QUEUE_LOW_WATER_SAMPLES = 2048;
-constexpr std::size_t AUDIO_QUEUE_TARGET_SAMPLES = 4096;
+constexpr std::size_t AUDIO_QUEUE_LOW_WATER_SAMPLES = 1024;
+constexpr std::size_t AUDIO_QUEUE_TARGET_SAMPLES = 2048;
 
 struct KeyEdges {
     bool up, down, left, right, debug_toggle, enter, escape, space, quit;
@@ -78,10 +83,48 @@ bool take_edge(bool& previous, bool current) {
     return edge;
 }
 
+// Input needs two things the old polling-only path got wrong, and both showed up as
+// "I pressed it and nothing happened".
+//
+// 1. A press shorter than one loop iteration was invisible. Edges were derived purely
+//    by comparing consecutive SDL_GetKeyboardState snapshots, and the loop iterates on
+//    vsync (~16 ms), so a quick tap that went down and up in between simply never
+//    existed. Real key EVENTS are queued by SDL and cannot be missed, so keydowns are
+//    now folded in from the event queue as well.
+// 2. Edges were thrown away on any iteration that did not advance the simulation.
+//    The loop runs at the display rate but the game ticks at 36 Hz, so roughly a third
+//    of iterations perform no step -- and the edges sampled on those were dropped on
+//    the floor. Edges are now STICKY: they accumulate until a simulation step actually
+//    consumes them.
 struct KeyLatch {
     bool up = false, down = false, left = false, right = false;
     bool debug_toggle = false, enter = false, escape = false, space = false, quit = false;
     bool rate_up = false, rate_down = false;
+
+    // Edges seen but not yet handed to a simulation step.
+    core::AppInput pending{};
+    bool pending_debug_toggle = false, pending_quit = false;
+    bool pending_rate_up = false, pending_rate_down = false;
+
+    // A real key-down event, which no poll interval can hide.
+    void note_keydown(SDL_Scancode code) {
+        switch (code) {
+            case SDL_SCANCODE_UP: case SDL_SCANCODE_W: pending.up = true; break;
+            case SDL_SCANCODE_DOWN: case SDL_SCANCODE_S: pending.down = true; break;
+            case SDL_SCANCODE_LEFT: case SDL_SCANCODE_A: pending.left = true; break;
+            case SDL_SCANCODE_RIGHT: case SDL_SCANCODE_D: pending.right = true; break;
+            case SDL_SCANCODE_RETURN: pending.enter = true; break;
+            case SDL_SCANCODE_ESCAPE: pending.escape = true; break;
+            case SDL_SCANCODE_SPACE: pending.space = true; break;
+            case SDL_SCANCODE_TAB: pending_debug_toggle = true; break;
+            case SDL_SCANCODE_Q: pending_quit = true; break;
+            case SDL_SCANCODE_EQUALS: case SDL_SCANCODE_KP_PLUS:
+                pending_rate_up = true; break;
+            case SDL_SCANCODE_MINUS: case SDL_SCANCODE_KP_MINUS:
+                pending_rate_down = true; break;
+            default: break;
+        }
+    }
 
     HostInput sample(const Uint8* kb) {
         const KeyEdges current{
@@ -97,25 +140,45 @@ struct KeyLatch {
             static_cast<bool>(kb[SDL_SCANCODE_EQUALS] || kb[SDL_SCANCODE_KP_PLUS]),
             static_cast<bool>(kb[SDL_SCANCODE_MINUS] || kb[SDL_SCANCODE_KP_MINUS])};
 
+        // Poll-derived edges as well, so a key already down when the window gains
+        // focus (no event delivered) still registers.
+        if (take_edge(up, current.up)) pending.up = true;
+        if (take_edge(down, current.down)) pending.down = true;
+        if (take_edge(left, current.left)) pending.left = true;
+        if (take_edge(right, current.right)) pending.right = true;
+        if (take_edge(enter, current.enter)) pending.enter = true;
+        if (take_edge(escape, current.escape)) pending.escape = true;
+        if (take_edge(space, current.space)) pending.space = true;
+        if (take_edge(debug_toggle, current.debug_toggle)) pending_debug_toggle = true;
+        if (take_edge(quit, current.quit)) pending_quit = true;
+        if (take_edge(rate_up, current.rate_up)) pending_rate_up = true;
+        if (take_edge(rate_down, current.rate_down)) pending_rate_down = true;
+
         HostInput out;
-        out.debug_toggle = take_edge(debug_toggle, current.debug_toggle);
-        out.quit = take_edge(quit, current.quit);
-        out.rate_up = take_edge(rate_up, current.rate_up);
-        out.rate_down = take_edge(rate_down, current.rate_down);
-        out.app.up = take_edge(up, current.up);
-        out.app.down = take_edge(down, current.down);
-        out.app.left = take_edge(left, current.left);
-        out.app.right = take_edge(right, current.right);
-        out.app.enter = take_edge(enter, current.enter);
-        out.app.escape = take_edge(escape, current.escape);
-        out.app.space = take_edge(space, current.space);
+        out.app = pending;
         out.app.up_held = current.up;
         out.app.down_held = current.down;
         out.app.left_held = current.left;
         out.app.right_held = current.right;
         out.app.enter_held = current.enter;
         out.app.space_held = current.space;
+        out.debug_toggle = pending_debug_toggle;
+        out.quit = pending_quit;
+        out.rate_up = pending_rate_up;
+        out.rate_down = pending_rate_down;
         return out;
+    }
+
+    // Game edges are cleared only once a simulation step has acted on them.
+    void clear_app_edges() { pending = core::AppInput{}; }
+
+    // Host-level keys (debug view, quit, rate tuning) are handled straight away, once
+    // per iteration, so they clear immediately and never double-fire.
+    void clear_host_edges() {
+        pending_debug_toggle = false;
+        pending_quit = false;
+        pending_rate_up = false;
+        pending_rate_down = false;
     }
 };
 
@@ -317,9 +380,13 @@ int run(const std::string& source_root) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) running = false;
+            // Every real press is captured here, however brief it was.
+            if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
+                latch.note_keydown(event.key.keysym.scancode);
+            }
         }
-        SDL_PumpEvents();
         const HostInput input = latch.sample(SDL_GetKeyboardState(nullptr));
+        latch.clear_host_edges();
         if (input.quit) break;
         if (input.debug_toggle) {
             debug_view = renderer::debug_next(debug_view);
@@ -347,6 +414,7 @@ int run(const std::string& source_root) {
                 consumed_input = true;
                 app_input = input.app;
             }
+            if (step_count == 0) latch.clear_app_edges();
             core::AppTickResult tick = app.tick(app_input);
             // The original saves as soon as a road is completed; this only writes
             // when a count actually changed, so it is cheap to check each tick.
