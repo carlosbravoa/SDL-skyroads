@@ -128,6 +128,34 @@ inline constexpr int32_t DOS_GRAVITY_READOUT_Y = 156;
 inline constexpr std::size_t DOS_GRAVITY_READOUT_DIGITS = 4;
 inline int32_t dos_gravity_readout(int32_t gravity) { return (gravity - 3) * 100; }
 
+// Empty-tank indicators. When a tank runs dry the HUD swaps two palette entries over
+// a small rectangle on the dashboard, which makes the label flash, and plays SFX 3:
+//   oxygen empty (state 5, @0x1397-0x13f0): 7x7 at (160, 161)  -- the "O2" label
+//   fuel empty   (state 4, @0x1480-0x14d9): 16x5 at (155, 169) -- the "FUEL" label
+// The swap (@0x11d5) exchanges palette 0x63 and 0x64, i.e. dashbrd.lzs CMAP entries 7
+// and 8, so the label alternates between its normal near-white and red.
+inline constexpr int32_t DOS_OXYGEN_WARN_X = 160;
+inline constexpr int32_t DOS_OXYGEN_WARN_Y = 161;
+inline constexpr int32_t DOS_OXYGEN_WARN_W = 7;
+inline constexpr int32_t DOS_OXYGEN_WARN_H = 7;
+inline constexpr int32_t DOS_FUEL_WARN_X = 155;
+inline constexpr int32_t DOS_FUEL_WARN_Y = 169;
+inline constexpr int32_t DOS_FUEL_WARN_W = 16;
+inline constexpr int32_t DOS_FUEL_WARN_H = 5;
+inline constexpr std::size_t DOS_WARN_PALETTE_A = 7; // 0x63
+inline constexpr std::size_t DOS_WARN_PALETTE_B = 8; // 0x64
+inline constexpr uint8_t DOS_WARN_SFX = 3;
+// The alarm is a square wave on the game tick: @0x124b computes
+// `phase = (tick % 9) > 4`, giving four ticks on and five off = about 4 Hz. The HUD
+// only acts when the phase CHANGES (it keeps the previous value in ds:0xaf2e, zeroed
+// at road start @0x2b3a), swapping the two colours on every edge -- so the label is
+// swapped throughout the high phase -- and plays the beep on the rising edge only.
+inline constexpr std::size_t DOS_WARN_BLINK_PERIOD = 9;
+inline constexpr std::size_t DOS_WARN_BLINK_THRESHOLD = 4;
+inline bool dos_warn_blink_phase(std::size_t tick) {
+    return (tick % DOS_WARN_BLINK_PERIOD) > DOS_WARN_BLINK_THRESHOLD;
+}
+
 // Replaces skyroads::data::ExeDispatchEntry in the planner so nothing in the
 // runtime path names the executable.
 struct DispatchEntry {

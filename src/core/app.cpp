@@ -1,5 +1,7 @@
 #include "core/app.hpp"
 
+#include "core/dos_render_tables.hpp"
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -210,13 +212,25 @@ AppTickResult AttractModeApp::tick(AppInput input) {
         case AppMode::Intro: tick_intro(input, audio); break;
         case AppMode::MainMenu: tick_main_menu(input, audio); break;
         case AppMode::HelpMenu: tick_help_menu(input, audio); break;
-        case AppMode::SettingsMenu: tick_settings_menu(input); break;
+        case AppMode::SettingsMenu: tick_settings_menu(input, audio); break;
         case AppMode::GoMenu: tick_go_menu(input, audio); break;
         case AppMode::DemoPlayback: tick_demo(input, audio); break;
         case AppMode::Gameplay: tick_gameplay(input, audio); break;
         case AppMode::Boot:
             mode_ = AppMode::MainMenu;
             break;
+    }
+
+    // The song loader itself refuses to do anything while the sound option is set
+    // (@0x57bd), so a config with music turned off stays silent everywhere. Sound
+    // effects are unaffected -- that check is only in the song loader.
+    if (sound_option_ != 0) {
+        audio.erase(std::remove_if(audio.begin(), audio.end(),
+                                   [](const AudioCommand& command) {
+                                       return command.kind ==
+                                              AudioCommandKind::PlaySong;
+                                   }),
+                    audio.end());
     }
 
     AppTickResult result;
@@ -317,10 +331,45 @@ void AttractModeApp::tick_help_menu(AppInput input,
     }
 }
 
-void AttractModeApp::tick_settings_menu(AppInput input) {
-    if (input.escape || input.enter || input.space) {
+// Settings screen (@0x4c17). Cursor 0..4: positions 0-2 pick the input device
+// (ds:0x4526) and 3-4 the sound option (ds:0x4528). Navigation is literally the
+// EXE's (@0x4d08-0x4d9c): LEFT and RIGHT walk the five positions in a line, UP goes
+// 3 -> 0 and 4 -> 1, and DOWN goes 0 -> 3 and anything already at 3 or more to 4 --
+// so DOWN from position 1 or 2 does nothing at all. ENTER applies the highlighted
+// position, ESC leaves (and the host then saves skyroads.cfg, as @0x4da5 does).
+void AttractModeApp::tick_settings_menu(AppInput input,
+                                        std::vector<AudioCommand>& audio) {
+    if (input.escape) {
         mode_ = AppMode::MainMenu;
         menu_idle_tick_ = 0;
+        return;
+    }
+    if (input.left && settings_cursor_ != 0) settings_cursor_ -= 1;
+    if (input.right && settings_cursor_ < 4) settings_cursor_ += 1;
+    if (input.up) {
+        if (settings_cursor_ == 3) settings_cursor_ = 0;
+        else if (settings_cursor_ == 4) settings_cursor_ = 1;
+    }
+    if (input.down) {
+        if (settings_cursor_ == 0) settings_cursor_ = 3;
+        else if (settings_cursor_ >= 3) settings_cursor_ = 4;
+    }
+    if (input.enter) {
+        if (settings_cursor_ <= 2) {
+            input_device_ = settings_cursor_;
+        } else {
+            sound_option_ = settings_cursor_ - 3;
+            // @0x4ce4: a non-zero sound option stops the music and parks the loaded
+            // song at 0xFFFF, after which the loader early-returns forever. Turning
+            // it back on restarts song 1 straight away.
+            if (sound_option_ != 0) {
+                audio.push_back(AudioCommand::stop_song());
+                menu_song_started_ = false;
+            } else {
+                audio.push_back(AudioCommand::play_song(MENU_SONG_INDEX));
+                menu_song_started_ = true;
+            }
+        }
     }
 }
 
@@ -399,6 +448,7 @@ void AttractModeApp::tick_gameplay(AppInput input,
         GameplayFrameResult result =
             gameplay_session_.run_frame(input.gameplay_controls());
         emit_sfx_for_events(result.events, audio);
+        emit_empty_tank_alarm(audio);
         return;
     }
 
@@ -456,6 +506,21 @@ void AttractModeApp::tick_gameplay(AppInput input,
     GameplayFrameResult result =
         gameplay_session_.run_frame(input.gameplay_controls());
     emit_sfx_for_events(result.events, audio);
+}
+
+// The empty-tank alarm. The HUD plays SFX 3 on the rising edge of the same 4 Hz blink
+// phase that flashes the label (@0x13eb for oxygen, @0x14d4 for fuel), for as long as
+// the ship is out of that resource.
+void AttractModeApp::emit_empty_tank_alarm(std::vector<AudioCommand>& audio) {
+    const ShipState state = gameplay_session_.ship.state;
+    const bool empty =
+        state == ShipState::OutOfFuel || state == ShipState::OutOfOxygen;
+    const bool phase =
+        empty && dos_warn_blink_phase(gameplay_session_.frame_index());
+    if (phase && !warn_blink_phase_) {
+        audio.push_back(AudioCommand::play_sfx(DOS_WARN_SFX));
+    }
+    warn_blink_phase_ = phase;
 }
 
 // Picks the next in-game track. The original chooses at random and only guards
@@ -550,7 +615,8 @@ RenderScene AttractModeApp::current_render_scene() const {
             break;
         case AppMode::SettingsMenu:
             scene.tag = RenderScene::Tag::SettingsMenu;
-            scene.settings_menu = SettingsMenuScene{0};
+            scene.settings_menu =
+                SettingsMenuScene{settings_cursor_, input_device_, sound_option_};
             break;
         case AppMode::GoMenu:
             scene.tag = RenderScene::Tag::GoMenu;

@@ -226,6 +226,10 @@ int run(const std::string& source_root) {
                 config.road_completions[i], 255));
         }
         app.set_road_completions(counts);
+        // The two setting words are the input device and the sound option, and the
+        // original really does act on them at startup: a non-zero sound option means
+        // the song loader never plays anything (@0x57bd).
+        app.set_settings(config.setting_a, config.setting_b);
     }
     auto persist_progress = [&]() {
         const auto& counts = app.road_completions();
@@ -235,6 +239,14 @@ int run(const std::string& source_root) {
                 config.road_completions[i] = counts[i];
                 changed = true;
             }
+        }
+        if (config.setting_a != app.input_device()) {
+            config.setting_a = static_cast<uint16_t>(app.input_device());
+            changed = true;
+        }
+        if (config.setting_b != app.sound_option()) {
+            config.setting_b = static_cast<uint16_t>(app.sound_option());
+            changed = true;
         }
         if (changed) data::save_game_config(config_path, config);
     };

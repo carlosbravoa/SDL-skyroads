@@ -180,6 +180,11 @@ private:
                     std::size_t level) const;
     void draw_dashboard_number(FrameBuffer320x200& frame, int32_t x, int32_t y,
                                int32_t value, std::size_t digits) const;
+    void draw_rom_text(FrameBuffer320x200& frame, int32_t x, int32_t y,
+                       const std::string& text, RgbColor color) const;
+    RgbColor dashboard_palette_color(std::size_t index) const;
+    void draw_empty_tank_warning(FrameBuffer320x200& frame,
+                                 const DemoPlaybackState& scene) const;
     void draw_archive_frame(FrameBuffer320x200& frame,
                             const ImageArchive& archive, std::size_t frame_index,
                             float alpha, float brightness) const;

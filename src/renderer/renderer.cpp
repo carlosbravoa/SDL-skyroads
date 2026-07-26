@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <utility>
 
+#include "core/dos_font.hpp"
 #include "core/dos_render_tables.hpp"
 #include "core/planner.hpp"
 #include "data/dashboard.hpp"
@@ -37,6 +38,11 @@ constexpr std::size_t VIEW_BOTTOM_Y = DASHBOARD_TOP;
 constexpr std::size_t SHIP_SCALE = 1;
 // intro.lzs picture 1 is the SKYROADS title (320x54 at y = 32).
 constexpr std::size_t INTRO_TITLE_FRAME = 1;
+
+// setmenu.lzs layout: 0 = background, 1..5 = cursor outlines, 6..10 = active markers.
+constexpr std::size_t SETTINGS_POSITIONS = 5;
+constexpr std::size_t SETTINGS_CURSOR_FIRST_FRAME = 1;
+constexpr std::size_t SETTINGS_MARKER_FIRST_FRAME = 6;
 
 // Gauge levels, straight out of the HUD update.
 // Fuel and oxygen: a full tank is 0x7530 and the bar has ten segments, so the level
@@ -1215,9 +1221,21 @@ void ReferenceRenderer::render_help_menu(FrameBuffer320x200& frame,
 void ReferenceRenderer::render_settings_menu(FrameBuffer320x200& frame,
                                              const SettingsMenuScene& scene) const {
     frame.clear(RgbColor(0, 0, 0));
-    const std::size_t frame_index =
-        std::min(scene.frame_index, sat_sub(assets_.settings_menu.frames.size(), 1));
-    draw_archive_frame(frame, assets_.settings_menu, frame_index, 1.0f, 1.0f);
+    // setmenu.lzs: picture 0 is the background, 1..5 are the cursor outlines for the
+    // five positions and 6..10 the "this option is active" fills. @0x4ae2 walks all
+    // five positions and draws the fill only where the position matches the current
+    // setting; @0x4c9a draws the outline for wherever the cursor is.
+    draw_archive_frame(frame, assets_.settings_menu, 0, 1.0f, 1.0f);
+    for (std::size_t position = 0; position < SETTINGS_POSITIONS; ++position) {
+        const bool active = position <= 2 ? position == scene.input_device
+                                          : position - 3 == scene.sound_option;
+        if (!active) continue;
+        draw_archive_frame(frame, assets_.settings_menu,
+                           SETTINGS_MARKER_FIRST_FRAME + position, 1.0f, 1.0f);
+    }
+    const std::size_t cursor = std::min(scene.cursor, SETTINGS_POSITIONS - 1);
+    draw_archive_frame(frame, assets_.settings_menu,
+                       SETTINGS_CURSOR_FIRST_FRAME + cursor, 1.0f, 1.0f);
 }
 
 void ReferenceRenderer::render_go_menu(FrameBuffer320x200& frame,
@@ -1283,6 +1301,7 @@ void ReferenceRenderer::render_play_scene(FrameBuffer320x200& frame,
     draw_gauge(frame, assets_.oxygen_gauge, tank_gauge_level(scene.snapshot.oxygen_percent));
     draw_gauge(frame, assets_.fuel_gauge, tank_gauge_level(scene.snapshot.fuel_percent));
     draw_gauge(frame, assets_.speed_gauge, speed_gauge_level(scene.snapshot.z_velocity));
+    draw_empty_tank_warning(frame, scene);
     draw_dashboard_number(frame, skyroads::core::DOS_GRAVITY_READOUT_X,
                           skyroads::core::DOS_GRAVITY_READOUT_Y,
                           skyroads::core::dos_gravity_readout(
@@ -1293,8 +1312,13 @@ void ReferenceRenderer::render_play_scene(FrameBuffer320x200& frame,
     // Completed", or "The End" on the last remaining road, at y=80. Dying shows
     // nothing at all -- the road simply restarts.
     if (!scene.is_demo && scene.did_win) {
-        draw_text_centered(frame, scene.is_final_road ? "THE END" : "ROAD COMPLETED",
-                           80, RgbColor(220, 235, 255), 1);
+        // The original prints these with the BIOS 8x8 ROM font, centred as
+        // 160 - len*8/2 at y = 80, in palette index 0x63 -- dashbrd.lzs CMAP entry 7,
+        // since it loads at base 0x5C (@0x2c62-0x2c8a).
+        const std::string text =
+            scene.is_final_road ? std::string("The End") : std::string("Road Completed");
+        draw_rom_text(frame, skyroads::core::dos_text_centered_x(text.size()), 80, text,
+                      dashboard_palette_color(7));
     }
 }
 
@@ -1442,6 +1466,80 @@ void ReferenceRenderer::draw_dashboard_number(FrameBuffer320x200& frame, int32_t
         }
         remaining -= digit * divisor;
         divisor *= 10;
+    }
+}
+
+// The BIOS 8x8 ROM font printer (@0x450a): one glyph per character, x advancing by
+// exactly 8, and glyph bit 0x80 >> column. Background pixels are left alone.
+void ReferenceRenderer::draw_rom_text(FrameBuffer320x200& frame, int32_t x, int32_t y,
+                                      const std::string& text, RgbColor color) const {
+    int32_t pen = x;
+    for (char ch : text) {
+        const auto& glyph = skyroads::core::dos_font_glyph(ch);
+        for (std::size_t row = 0; row < skyroads::core::DOS_FONT_HEIGHT; ++row) {
+            const uint8_t bits = glyph[row];
+            for (std::size_t col = 0; col < 8; ++col) {
+                if ((bits & (0x80u >> col)) == 0) continue;
+                const int32_t px = pen + static_cast<int32_t>(col);
+                const int32_t py = y + static_cast<int32_t>(row);
+                if (px < 0 || py < 0) continue;
+                frame.set_pixel(static_cast<std::size_t>(px),
+                                static_cast<std::size_t>(py), color);
+            }
+        }
+        pen += skyroads::core::DOS_FONT_ADVANCE;
+    }
+}
+
+// dashbrd.lzs loads at palette base 0x5C, so global index 0x5C + n is simply the
+// n-th colour of its own CMAP.
+RgbColor ReferenceRenderer::dashboard_palette_color(std::size_t index) const {
+    if (!assets_.dashboard.frames.empty() && !assets_.dashboard.frames[0].empty()) {
+        const auto& colors = assets_.dashboard.frames[0].front().palette.colors;
+        if (index < colors.size()) return colors[index];
+    }
+    return RgbColor(255, 255, 255);
+}
+
+// The flashing label over an empty tank. The original swaps two palette entries in
+// place on each edge of the 4 Hz blink phase, and never repaints the dashboard, so the
+// label sits swapped for the whole high phase. This renderer redraws the dashboard
+// every frame, so the equivalent is to apply the swap while the phase is high.
+void ReferenceRenderer::draw_empty_tank_warning(FrameBuffer320x200& frame,
+                                                const DemoPlaybackState& scene) const {
+    if (!skyroads::core::dos_warn_blink_phase(scene.frame_index)) return;
+    int32_t x = 0, y = 0, w = 0, h = 0;
+    if (scene.ship.state == ShipState::OutOfOxygen) {
+        x = skyroads::core::DOS_OXYGEN_WARN_X;
+        y = skyroads::core::DOS_OXYGEN_WARN_Y;
+        w = skyroads::core::DOS_OXYGEN_WARN_W;
+        h = skyroads::core::DOS_OXYGEN_WARN_H;
+    } else if (scene.ship.state == ShipState::OutOfFuel) {
+        x = skyroads::core::DOS_FUEL_WARN_X;
+        y = skyroads::core::DOS_FUEL_WARN_Y;
+        w = skyroads::core::DOS_FUEL_WARN_W;
+        h = skyroads::core::DOS_FUEL_WARN_H;
+    } else {
+        return;
+    }
+    const RgbColor a = dashboard_palette_color(skyroads::core::DOS_WARN_PALETTE_A);
+    const RgbColor b = dashboard_palette_color(skyroads::core::DOS_WARN_PALETTE_B);
+    for (int32_t py = y; py < y + h; ++py) {
+        for (int32_t px = x; px < x + w; ++px) {
+            if (px < 0 || py < 0) continue;
+            const std::size_t ux = static_cast<std::size_t>(px);
+            const std::size_t uy = static_cast<std::size_t>(py);
+            const std::size_t offset = (uy * SCREEN_WIDTH + ux) * 4;
+            if (offset + 2 >= frame.pixels_rgba.size()) continue;
+            const RgbColor current(frame.pixels_rgba[offset],
+                                   frame.pixels_rgba[offset + 1],
+                                   frame.pixels_rgba[offset + 2]);
+            if (current == a) {
+                frame.set_pixel(ux, uy, b);
+            } else if (current == b) {
+                frame.set_pixel(ux, uy, a);
+            }
+        }
     }
 }
 

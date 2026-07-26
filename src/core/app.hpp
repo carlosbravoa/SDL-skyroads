@@ -6,6 +6,7 @@
 // scene payloads (DemoPlayback and Gameplay share DemoPlaybackState).
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -158,8 +159,14 @@ struct MainMenuScene {
 struct HelpMenuScene {
     std::size_t page_index;
 };
+// The settings screen (@0x4c17). Five positions laid out as three across the top
+// (the input device) and two below (sound on/off). setmenu.lzs holds the background
+// as picture 0, the five cursor outlines as pictures 1..5, and the five "this one is
+// active" fills as pictures 6..10.
 struct SettingsMenuScene {
-    std::size_t frame_index;
+    std::size_t cursor;        // 0..4
+    std::size_t input_device;  // ds:0x4526, 0..2
+    std::size_t sound_option;  // ds:0x4528, 0 = music on, 1 = off
 };
 
 // World/level select shown before gameplay (uses GOMENU art + a text overlay).
@@ -216,6 +223,14 @@ public:
     GoMenuScene current_go_menu_scene() const;
     // Per-road completion counts, so the host can persist them to skyroads.cfg.
     const std::array<uint8_t, 30>& road_completions() const { return road_completions_; }
+    // The two settings words the original keeps in skyroads.cfg: ds:0x4526 is the
+    // input device and ds:0x4528 the sound option (non-zero silences the music).
+    std::size_t input_device() const { return input_device_; }
+    std::size_t sound_option() const { return sound_option_; }
+    void set_settings(std::size_t input_device, std::size_t sound_option) {
+        input_device_ = std::min<std::size_t>(input_device, 2);
+        sound_option_ = std::min<std::size_t>(sound_option, 1);
+    }
     // Number of non-empty groups in anim.lzs. The intro spends two ticks on each, so
     // the sequence length depends on the asset; the host sets this once it has loaded
     // the archive. The default is the shipped file's count.
@@ -230,11 +245,12 @@ private:
     void tick_intro(AppInput input, std::vector<AudioCommand>& audio);
     void tick_main_menu(AppInput input, std::vector<AudioCommand>& audio);
     void tick_help_menu(AppInput input, std::vector<AudioCommand>& audio);
-    void tick_settings_menu(AppInput input);
+    void tick_settings_menu(AppInput input, std::vector<AudioCommand>& audio);
     void tick_go_menu(AppInput input, std::vector<AudioCommand>& audio);
     void tick_demo(AppInput input, std::vector<AudioCommand>& audio);
     void tick_gameplay(AppInput input, std::vector<AudioCommand>& audio);
     uint8_t next_gameplay_song();
+    void emit_empty_tank_alarm(std::vector<AudioCommand>& audio);
     void start_demo(std::vector<AudioCommand>& audio);
     void restart_intro(std::vector<AudioCommand>& audio);
     void start_gameplay(std::vector<AudioCommand>& audio);
@@ -278,6 +294,10 @@ private:
     bool intro_song_started_;
     bool intro_sample_started_;
     bool menu_song_started_;
+    std::size_t settings_cursor_ = 0;
+    std::size_t input_device_ = 0;
+    std::size_t sound_option_ = 0;
+    bool warn_blink_phase_ = false;
 };
 
 } // namespace skyroads::core

@@ -327,6 +327,98 @@ static void test_app_road_end_flyoff(const RoadsArchive& roads,
     CHECK_TRUE(app.road_completions()[0] >= 1);
 }
 
+// Settings screen (@0x4c17): five positions, three across for the input device and
+// two below for sound. LEFT/RIGHT walk them in a line, UP goes 3->0 and 4->1, DOWN
+// goes 0->3 and 3+->4 -- and DOWN from 1 or 2 does nothing at all.
+// The 8x8 font table is a hand-generated literal, and a single mis-sized row shifts
+// every glyph after it (a trailing backslash in a comment did exactly that once, by
+// line-continuing over the next entry). Pin a few glyphs and the table size.
+static void test_dos_font_table() {
+    CHECK_EQ(skyroads::core::DOS_FONT_8X8.size(),
+             static_cast<std::size_t>(skyroads::core::DOS_FONT_LAST_CHAR -
+                                      skyroads::core::DOS_FONT_FIRST_CHAR + 1));
+    // Space is blank; the classic IBM VGA 'A', 'R' and 'o'.
+    for (uint8_t row : skyroads::core::dos_font_glyph(' ')) CHECK_EQ(row, uint8_t{0});
+    const std::array<uint8_t, 8> a = {0x38, 0x6C, 0xC6, 0xFE, 0xC6, 0xC6, 0xC6, 0x00};
+    const std::array<uint8_t, 8> r = {0xFC, 0x66, 0x66, 0x7C, 0x6C, 0x66, 0xE6, 0x00};
+    const std::array<uint8_t, 8> o = {0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0x7C, 0x00};
+    for (std::size_t i = 0; i < 8; ++i) {
+        CHECK_EQ(skyroads::core::dos_font_glyph('A')[i], a[i]);
+        CHECK_EQ(skyroads::core::dos_font_glyph('R')[i], r[i]);
+        CHECK_EQ(skyroads::core::dos_font_glyph('o')[i], o[i]);
+    }
+    // The banner positions the original uses: 14 characters -> 104, 7 -> 132.
+    CHECK_EQ(skyroads::core::dos_text_centered_x(14), 104);
+    CHECK_EQ(skyroads::core::dos_text_centered_x(7), 132);
+}
+
+static void test_app_settings_menu(const RoadsArchive& roads,
+                                   const DemoRecording& demo) {
+    AttractModeApp app = make_app(roads, demo);
+    app.tick(AppInput{});
+    app.tick(key(&AppInput::space)); // -> main menu
+    app.tick(key(&AppInput::down));  // cursor Start -> Config
+    AppTickResult t = app.tick(key(&AppInput::enter));
+    CHECK_TRUE(t.mode == AppMode::SettingsMenu);
+    CHECK_EQ(t.render_scene.settings_menu.cursor, static_cast<std::size_t>(0));
+
+    auto cursor = [&](AppTickResult& r) { return r.render_scene.settings_menu.cursor; };
+    t = app.tick(key(&AppInput::right));
+    CHECK_EQ(cursor(t), static_cast<std::size_t>(1));
+    t = app.tick(key(&AppInput::down)); // no effect from position 1
+    CHECK_EQ(cursor(t), static_cast<std::size_t>(1));
+    t = app.tick(key(&AppInput::left));
+    CHECK_EQ(cursor(t), static_cast<std::size_t>(0));
+    t = app.tick(key(&AppInput::down)); // 0 -> 3
+    CHECK_EQ(cursor(t), static_cast<std::size_t>(3));
+    t = app.tick(key(&AppInput::down)); // 3 -> 4
+    CHECK_EQ(cursor(t), static_cast<std::size_t>(4));
+    t = app.tick(key(&AppInput::up));   // 4 -> 1
+    CHECK_EQ(cursor(t), static_cast<std::size_t>(1));
+
+    // Applying position 1 selects input device 1.
+    t = app.tick(key(&AppInput::enter));
+    CHECK_EQ(app.input_device(), static_cast<std::size_t>(1));
+    CHECK_EQ(t.render_scene.settings_menu.input_device, static_cast<std::size_t>(1));
+
+    // Position 4 is "sound off": it stops the music, and from then on no PlaySong
+    // command escapes at all, exactly as the song loader's own guard does. Getting
+    // there from position 1 needs LEFT first, since DOWN only works from 0.
+    app.tick(key(&AppInput::left));
+    app.tick(key(&AppInput::down));
+    app.tick(key(&AppInput::down));
+    t = app.tick(key(&AppInput::enter));
+    CHECK_EQ(app.sound_option(), static_cast<std::size_t>(1));
+    CHECK_EQ(t.audio_commands, (std::vector<AudioCommand>{AudioCommand::stop_song()}));
+    t = app.tick(key(&AppInput::escape)); // back to the main menu, which wants song 1
+    CHECK_TRUE(t.mode == AppMode::MainMenu);
+    for (const AudioCommand& c : t.audio_commands) {
+        CHECK_TRUE(c.kind != AudioCommandKind::PlaySong);
+    }
+}
+
+// The empty-tank alarm beeps on the rising edge of the 4 Hz blink phase (@0x124b),
+// for as long as the ship is out of fuel or oxygen.
+static void test_app_empty_tank_alarm(const RoadsArchive& roads,
+                                      const DemoRecording& demo) {
+    AttractModeApp app = make_app(roads, demo);
+    app.tick(AppInput{});
+    app.tick(key(&AppInput::space));
+    app.tick(key(&AppInput::enter));
+    app.tick(key(&AppInput::enter));
+    CHECK_TRUE(app.mode() == AppMode::Gameplay);
+    app.gameplay_session().ship.state = ShipState::OutOfOxygen;
+    std::size_t beeps = 0;
+    for (int i = 0; i < 36; ++i) {
+        AppTickResult t = app.tick(AppInput{});
+        for (const AudioCommand& c : t.audio_commands) {
+            if (c.kind == AudioCommandKind::PlaySfx && c.value == 3) beeps += 1;
+        }
+    }
+    // 36 ticks / 9 per cycle = four rising edges.
+    CHECK_EQ(beeps, static_cast<std::size_t>(4));
+}
+
 static void test_app_start_gameplay(const RoadsArchive& roads,
                                     const DemoRecording& demo) {
     AttractModeApp app = make_app(roads, demo);
@@ -522,6 +614,9 @@ CHECK_MAIN_BEGIN()
     test_app_intro_runs_into_demo(roads, demo);
     test_app_menu_has_no_idle_demo(roads, demo);
     test_app_road_end_flyoff(roads, demo);
+    test_dos_font_table();
+    test_app_settings_menu(roads, demo);
+    test_app_empty_tank_alarm(roads, demo);
     test_app_start_gameplay(roads, demo);
     test_app_select_navigates_world(roads, demo);
     test_app_death_restarts_road(roads, demo);
