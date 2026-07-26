@@ -298,8 +298,9 @@ void OplSynth::set_channel_config(std::size_t channel_index,
     apply_volume(channel_index);
 }
 
-// Volume @0x59f1/@0x59d3: keep the instrument's key-scale-level bits, add the
-// volume table's attenuation to its total level and clamp at maximum attenuation.
+// Volume @0x59f1 (which operator) and @0x59d3 (the write itself): keep the
+// instrument's key-scale-level bits, add the volume table's attenuation to its total
+// level and clamp at maximum attenuation.
 void OplSynth::apply_volume(std::size_t channel_index) {
     if (channel_index >= OPL_VOICES || !voice_has_instrument_[channel_index]) return;
     const auto& bytes = voice_instrument_[channel_index];
@@ -307,17 +308,30 @@ void OplSynth::apply_volume(std::size_t channel_index) {
     const uint8_t atten =
         OPL_VOLUME_ATTEN[std::min<std::size_t>(volume, OPL_VOLUME_ATTEN.size() - 1)];
 
+    // instrument byte index -> register slot, for one operator.
+    auto scale = [&](std::size_t byte_index, uint8_t slot) {
+        const uint8_t source = bytes[byte_index];
+        const uint8_t ksl = static_cast<uint8_t>(source & 0xC0);
+        uint16_t level = static_cast<uint16_t>(source & 0x3F) + atten;
+        if (level > 0x3F) level = 0x3F;
+        write_reg(static_cast<uint8_t>(0x40 + slot),
+                  static_cast<uint8_t>(ksl | static_cast<uint8_t>(level)));
+    };
+
     const uint8_t op2 = OPL_OP2_SLOT[channel_index];
-    // Two-operator voices scale the carrier (operator 2); the single-operator
-    // percussion voices scale their only operator instead.
-    const bool two_op = op2 != 0xFF;
-    const uint8_t source = two_op ? bytes[6] : bytes[1];
-    const uint8_t slot = two_op ? op2 : OPL_OP1_SLOT[channel_index];
-    const uint8_t ksl = static_cast<uint8_t>(source & 0xC0);
-    uint16_t level = static_cast<uint16_t>(source & 0x3F) + atten;
-    if (level > 0x3F) level = 0x3F;
-    write_reg(static_cast<uint8_t>(0x40 + slot),
-              static_cast<uint8_t>(ksl | static_cast<uint8_t>(level)));
+    if (op2 == 0xFF) {
+        // Single-operator percussion: @0x5a09 tail-calls straight through, scaling
+        // operator 1 from the instrument's own byte 1.
+        scale(1, OPL_OP1_SLOT[channel_index]);
+        return;
+    }
+    // Two-operator voices scale the carrier (operator 2)...
+    scale(6, op2);
+    // ...and, when the instrument's 0xC0 byte selects additive synthesis (bit 0 set,
+    // tested at @0x5a1f), operator 1 is a carrier too and gets the same treatment.
+    if ((bytes[10] & 0x01) != 0) {
+        scale(1, OPL_OP1_SLOT[channel_index]);
+    }
 }
 
 void OplSynth::set_channel_volume(std::size_t channel_index, uint8_t volume) {
@@ -326,18 +340,26 @@ void OplSynth::set_channel_volume(std::size_t channel_index, uint8_t volume) {
     apply_volume(channel_index);
 }
 
-// Note on @0x5955: write the frequency number and block, then key on. Voices 0..5
-// key on with bit 0x20 of 0xB0; the rhythm voices instead set their bit in 0xBD.
+// Note on @0x5955. Three details that all matter:
+//  * the handler's FIRST act is `call 0x59b3` -- a full key off. A rhythm voice only
+//    retriggers when its 0xBD bit goes 1 -> 0 -> 1, so without this a drum sounds
+//    once and then stays silent for the rest of the song.
+//  * the melodic path covers voices 0..6 (`cmp al, 7` @0x595f), but the key-on bit
+//    is only OR-ed in when the register is below 0xB6 (@0x598c) -- so voice 6, the
+//    bass drum, gets a real pitch on 0xA6/0xB6 without the 0x20 bit.
+//  * voices 7..10 jump straight past the frequency writes and only set their 0xBD
+//    bit; their pitch comes from OPL channels 7 and 8, which they share.
 void OplSynth::start_note(std::size_t channel_index, uint16_t freq_num,
                           uint8_t block_num) {
     if (channel_index >= OPL_VOICES) return;
-    const uint8_t channel = OPL_CHANNEL[channel_index];
-    if (channel != 0xFF) {
+    stop_note(channel_index);
+    if (channel_index < 7) {
+        const uint8_t channel = OPL_CHANNEL[channel_index];
         write_reg(static_cast<uint8_t>(0xA0 + channel),
                   static_cast<uint8_t>(freq_num & 0xFF));
         uint8_t high = static_cast<uint8_t>(((freq_num >> 8) & 0x03) |
                                             static_cast<uint8_t>((block_num & 0x07) << 2));
-        if (channel_index < 6) high |= 0x20; // key on
+        if (channel < 6) high |= 0x20; // key on
         write_reg(static_cast<uint8_t>(0xB0 + channel), high);
     }
     if (channel_index >= 6) {
@@ -499,8 +521,7 @@ void MuzaxPlayer::play_note(std::size_t channel, uint8_t note, OplSynth& synth) 
     const std::size_t octave = static_cast<std::size_t>(note / 12) + 2;
     const uint16_t freq_num = static_cast<uint16_t>(
         (static_cast<uint16_t>(high_freqs[note_idx]) << 8) | low_freqs[note_idx]);
-    const std::size_t target = channel < 6 ? channel : channel - 6 + 6;
-    synth.start_note(target, freq_num, static_cast<uint8_t>(octave));
+    synth.start_note(channel, freq_num, static_cast<uint8_t>(octave));
 }
 
 // ---- AttractAudioAssets ----------------------------------------------------

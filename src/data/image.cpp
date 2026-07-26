@@ -64,7 +64,8 @@ std::pair<ImagePalette, std::size_t> parse_cmap(const Bytes& data,
 // Returns the frame plus bytes consumed after the 4-byte tag.
 std::pair<ImageFrame, std::size_t> parse_pict(const Bytes& data,
                                               std::size_t offset,
-                                              ImagePalette palette) {
+                                              ImagePalette palette,
+                                              ImagePalette palette_start) {
     if (offset + 9 > data.size()) {
         throw Error::unexpected_eof("PICT header");
     }
@@ -89,6 +90,7 @@ std::pair<ImageFrame, std::size_t> parse_pict(const Bytes& data,
     frame.height = actual_height;
     frame.pixels = std::move(decoded.output);
     frame.palette = std::move(palette);
+    frame.palette_start = std::move(palette_start);
     frame.transparent_zero = true;
     return {std::move(frame), 9 + decoded.consumed};
 }
@@ -97,21 +99,30 @@ ImageArchive load_image_set_archive(const Bytes& data) {
     std::size_t cursor = 0;
     bool have_palette = false;
     ImagePalette current_palette;
+    ImagePalette previous_palette;
+    // A PICT preceded by two CMAPs takes the earlier one as its starting palette.
+    std::size_t palettes_since_frame = 0;
     std::vector<std::vector<ImageFrame>> frames;
 
     while (cursor < data.size()) {
         const auto chunk = read_ident(data, cursor);
         if (ident_is(chunk, "CMAP")) {
             auto [palette, consumed] = parse_cmap(data, cursor + 4);
+            previous_palette = std::move(current_palette);
             current_palette = std::move(palette);
             have_palette = true;
+            palettes_since_frame += 1;
             cursor += 4 + consumed;
         } else if (ident_is(chunk, "PICT")) {
             if (!have_palette) {
                 throw Error::invalid_format("PICT chunk appeared before CMAP");
             }
-            auto [frame, consumed] = parse_pict(data, cursor + 4, current_palette);
+            const ImagePalette& start =
+                palettes_since_frame >= 2 ? previous_palette : current_palette;
+            auto [frame, consumed] =
+                parse_pict(data, cursor + 4, current_palette, start);
             frames.push_back({std::move(frame)});
+            palettes_since_frame = 0;
             cursor += 4 + consumed;
         } else {
             throw Error::invalid_format("unexpected image chunk at offset " +
@@ -158,7 +169,8 @@ ImageArchive load_anim_archive(const Bytes& data) {
                                             std::to_string(frame_index) +
                                             " expected PICT");
             }
-            auto [frame, pict_consumed] = parse_pict(data, cursor + 4, palette);
+            auto [frame, pict_consumed] =
+                parse_pict(data, cursor + 4, palette, palette);
             fragments.push_back(std::move(frame));
             cursor += 4 + pict_consumed;
         }

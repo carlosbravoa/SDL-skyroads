@@ -52,6 +52,11 @@ struct ImageFrame {
     uint16_t height = 0;
     Bytes pixels;
     ImagePalette palette;
+    // When a PICT is preceded by TWO CMAPs, the game shows the picture in the first
+    // one and then fades the hardware palette across to the second (the intro applies
+    // it at @0x483a / @0x49a8 and fades with @0x4315). With a single CMAP the two are
+    // identical.
+    ImagePalette palette_start;
     bool transparent_zero = false;
     std::size_t pixel_count() const { return pixels.size(); }
 };

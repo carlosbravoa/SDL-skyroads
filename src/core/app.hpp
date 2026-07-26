@@ -85,13 +85,28 @@ struct AudioCommand {
     }
 };
 
+// The attract intro, decoded from the EXE's intro routine @0x4575. Every stage is
+// driven by the 36 Hz tick counter and every stage aborts the moment a key is seen,
+// so a keypress runs the whole remainder out in a few ticks.
 struct IntroSequenceState {
     std::size_t tick;
+    // Whole-screen palette fade (@0x4749 in, @0x4a95 out).
     float background_brightness;
-    float title_progress;
-    std::optional<std::size_t> anim_frame_index;
+    // Animation groups painted so far. The EXE blits each group's fragments over
+    // whatever is already on screen and leaves them there, so the picture builds up
+    // rather than being redrawn from the background each frame.
+    std::size_t anim_groups_drawn;
+    bool title_visible;
+    // Fraction of each row still showing the background during the interlaced wipe
+    // (@0x4844): 1 at the start, 0 once the title is fully revealed.
+    float title_wipe;
+    // The title's palette pulse: white flash (@0x4938) then a slow settle onto the
+    // second CMAP (@0x495a).
+    float title_white;
+    float title_mix;
     std::optional<std::size_t> credit_frame_index;
-    float credit_alpha;
+    // Credit screens pulse between their two CMAPs the same way (@0x49f6/@0x4a2e).
+    float credit_mix;
 };
 
 struct ShipRenderState {
@@ -201,6 +216,12 @@ public:
     GoMenuScene current_go_menu_scene() const;
     // Per-road completion counts, so the host can persist them to skyroads.cfg.
     const std::array<uint8_t, 30>& road_completions() const { return road_completions_; }
+    // Number of non-empty groups in anim.lzs. The intro spends two ticks on each, so
+    // the sequence length depends on the asset; the host sets this once it has loaded
+    // the archive. The default is the shipped file's count.
+    void set_intro_anim_group_count(std::size_t count) {
+        intro_anim_group_count_ = count;
+    }
     void set_road_completions(const std::array<uint8_t, 30>& counts) {
         road_completions_ = counts;
     }
@@ -223,6 +244,7 @@ private:
     std::size_t selected_road_index() const;
     RenderScene current_render_scene() const;
     IntroSequenceState current_intro_scene() const;
+    std::size_t intro_anim_ticks() const;
     DemoPlaybackState build_play_scene(const GameplaySession& session,
                                        bool is_demo) const;
     std::size_t final_credit_end_tick() const;
@@ -235,6 +257,7 @@ private:
     GameplaySession demo_session_;
     GameplaySession gameplay_session_;
     std::size_t intro_tick_;
+    std::size_t intro_anim_group_count_ = 83;
     std::size_t menu_idle_tick_;
     MenuCursor main_menu_cursor_;
     std::size_t help_page_;

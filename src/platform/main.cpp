@@ -24,6 +24,12 @@ namespace {
 
 constexpr int WINDOW_WIDTH = 1280;
 constexpr int WINDOW_HEIGHT = 960;
+// VGA mode 13h pixels are not square: the 320x200 framebuffer filled a 4:3 display,
+// so every pixel is 20% taller than it is wide. Presenting through a 4:3 logical
+// viewport reproduces that and letterboxes whatever window size the user picks,
+// instead of stretching the picture to the window's own aspect.
+constexpr int LOGICAL_WIDTH = 640;
+constexpr int LOGICAL_HEIGHT = 480;
 // The DOS game reprograms the PIT to 180.02 Hz (divisor 0x19E4) and ticks the
 // game/physics clock once every 5 interrupts -> ~36 Hz. Matching that rate is
 // essential: at the old 70 Hz the whole game ran ~1.94x too fast (and jumps felt
@@ -200,6 +206,15 @@ int run(const std::string& source_root) {
         renderer::AttractModeAssets::load_from_root(source_root));
     audio::AudioMixer audio_mixer(audio::AttractAudioAssets::load_from_root(source_root));
     core::AttractModeApp app(std::move(levels), demo);
+    {
+        // The intro spends two ticks on each non-empty anim.lzs group, so its length
+        // comes from the asset rather than a constant.
+        std::size_t anim_groups = 0;
+        for (const auto& group : reference_renderer.assets().anim.frames) {
+            if (!group.empty()) anim_groups += 1;
+        }
+        app.set_intro_anim_group_count(anim_groups);
+    }
 
     // Progress lives in skyroads.cfg next to the game data, as in the original.
     const std::string config_path = source_root + "/skyroads.cfg";
@@ -231,9 +246,11 @@ int run(const std::string& source_root) {
 
     SDL_Window* window =
         SDL_CreateWindow("SkyRoads Native", SDL_WINDOWPOS_CENTERED,
-                         SDL_WINDOWPOS_CENTERED, WINDOW_WIDTH, WINDOW_HEIGHT, 0);
+                         SDL_WINDOWPOS_CENTERED, WINDOW_WIDTH, WINDOW_HEIGHT,
+                         SDL_WINDOW_RESIZABLE);
     SDL_Renderer* presenter =
         SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    SDL_RenderSetLogicalSize(presenter, LOGICAL_WIDTH, LOGICAL_HEIGHT);
     SDL_Texture* texture =
         SDL_CreateTexture(presenter, SDL_PIXELFORMAT_RGBA32,
                           SDL_TEXTUREACCESS_STREAMING, 320, 200);

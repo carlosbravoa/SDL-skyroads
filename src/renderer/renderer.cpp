@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <utility>
 
+#include "core/dos_render_tables.hpp"
 #include "core/planner.hpp"
 #include "data/dashboard.hpp"
 #include "data/trekdat.hpp"
@@ -34,6 +35,8 @@ constexpr std::size_t DASHBOARD_TOP = 138;
 constexpr std::size_t HORIZON_Y = 24;
 constexpr std::size_t VIEW_BOTTOM_Y = DASHBOARD_TOP;
 constexpr std::size_t SHIP_SCALE = 1;
+// intro.lzs picture 1 is the SKYROADS title (320x54 at y = 32).
+constexpr std::size_t INTRO_TITLE_FRAME = 1;
 constexpr int32_t SHIP_SCREEN_X = 160;
 constexpr int32_t SHIP_SCREEN_Y = 84;
 constexpr int32_t DEBUG_PANEL_X = 8;
@@ -64,6 +67,17 @@ RgbColor scale_brightness(RgbColor color, float brightness) {
         return static_cast<uint8_t>(scaled);
     };
     return RgbColor(ch(color.r), ch(color.g), ch(color.b));
+}
+
+// Straight linear interpolation between two palette entries, as the intro's palette
+// fader does byte-wise (@0x43d8-@0x440f).
+RgbColor lerp_color(RgbColor from, RgbColor to, float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    auto ch = [&](uint8_t a, uint8_t b) -> uint8_t {
+        return static_cast<uint8_t>(std::lround(
+            lerp(static_cast<float>(a), static_cast<float>(b), t)));
+    };
+    return RgbColor(ch(from.r, to.r), ch(from.g, to.g), ch(from.b, to.b));
 }
 
 RgbColor road_color(LevelCell cell) {
@@ -162,6 +176,18 @@ uint8_t nonzero_or(uint8_t value, uint8_t fallback) {
 // indexing this palette with the shape's colour code, which yields the exact
 // road greys and wall pinks. Single-threaded renderer, so a file-local is safe.
 const std::vector<RgbColor>* g_road_palette = nullptr;
+
+// Both rasterizers translate the strip's shade byte through DS:0x0322 before it ever
+// reaches the palette, and they read different bytes of the entry: the forward pass
+// that draws the left half takes byte 0, the reverse pass that mirrors it onto the
+// right half takes byte 1. Byte 1 lifts the wall shades 0x1F..0x2D into a separate
+// 0x2E..0x3C band, so the two halves of a wall or tube are genuinely different
+// colours -- the shade the port used to be missing.
+uint8_t dos_shade_to_palette(uint8_t shade, DosRenderSide side) {
+    if (shade >= skyroads::core::DOS_SHADE_LUT_SIZE) return shade;
+    return side == DosRenderSide::Left ? skyroads::core::DOS_SHADE_LUT_FORWARD[shade]
+                                       : skyroads::core::DOS_SHADE_LUT_REVERSE[shade];
+}
 
 RgbColor dos_shape_color(LevelCell cell, uint8_t color_code) {
     if (g_road_palette != nullptr && color_code < g_road_palette->size()) {
@@ -876,8 +902,8 @@ bool PrimitiveCursor::emit(FrameBuffer320x200& frame, const TrekdatRecord& recor
     }
     next_offset = record.next_shape_offset(offset);
     if (shape->span_count == 0) return true;
-    const uint8_t color_code = override_color_code ? *override_color_code : shape->color;
-    const RgbColor color = dos_shape_color(cell, color_code);
+    const uint8_t shade = override_color_code ? *override_color_code : shape->color;
+    const RgbColor color = dos_shape_color(cell, dos_shade_to_palette(shade, side));
     draw_dos_shape(frame, *shape, color, side);
     return true;
 }
@@ -1088,22 +1114,36 @@ FrameBuffer320x200 ReferenceRenderer::render_scene_with_debug(
 void ReferenceRenderer::render_intro(FrameBuffer320x200& frame,
                                      const IntroSequenceState& scene) const {
     frame.clear(RgbColor(0, 0, 0));
+    // intro.lzs picture 0 is the backdrop the whole sequence is painted onto.
     draw_archive_frame(frame, assets_.intro, 0, 1.0f, scene.background_brightness);
-    if (scene.anim_frame_index) {
-        const std::size_t frame_index =
-            std::min(*scene.anim_frame_index, sat_sub(assets_.anim.frames.size(), 1));
-        draw_archive_frame(frame, assets_.anim, frame_index, 1.0f, 1.0f);
+
+    // The animation is cumulative: the EXE blits each group's fragments straight to
+    // the screen and never repaints the backdrop, so replay every group up to the
+    // current one. Groups with no fragments never make it into the flattened table
+    // at ds:0x45c4, so they cost no time and are skipped here too.
+    std::size_t groups_drawn = 0;
+    for (const auto& group : assets_.anim.frames) {
+        if (group.empty()) continue;
+        if (groups_drawn >= scene.anim_groups_drawn) break;
+        for (const auto& fragment : group) {
+            draw_fragment(frame, fragment, 1.0f, scene.background_brightness, 1.0f);
+        }
+        groups_drawn += 1;
     }
-    if (scene.credit_frame_index) {
-        const std::size_t intro_index =
-            std::min(*scene.credit_frame_index + 2, sat_sub(assets_.intro.frames.size(), 1));
-        draw_archive_frame(frame, assets_.intro, intro_index, scene.credit_alpha, 1.0f);
+
+    if (scene.title_visible && INTRO_TITLE_FRAME < assets_.intro.frames.size()) {
+        for (const auto& fragment : assets_.intro.frames[INTRO_TITLE_FRAME]) {
+            draw_intro_picture(frame, fragment, scene.title_mix, scene.title_white,
+                               scene.background_brightness, scene.title_wipe);
+        }
     }
-    if (scene.title_progress > 0.0f) {
-        draw_archive_frame_reveal(frame, assets_.intro, 1, scene.title_progress, 1.0f);
-    }
-    if (scene.title_progress >= 0.98f && !scene.credit_frame_index) {
-        draw_branding(frame, 186, 1, 0.8f);
+
+    if (scene.credit_frame_index &&
+        *scene.credit_frame_index < assets_.intro.frames.size()) {
+        for (const auto& fragment : assets_.intro.frames[*scene.credit_frame_index]) {
+            draw_intro_picture(frame, fragment, scene.credit_mix, 0.0f,
+                               scene.background_brightness, 0.0f);
+        }
     }
 }
 
@@ -1315,6 +1355,46 @@ void ReferenceRenderer::draw_archive_frame_reveal(FrameBuffer320x200& frame,
             static_cast<float>(std::max<uint16_t>(reveal_width, 1)) /
             static_cast<float>(fragment.width);
         draw_fragment(frame, fragment, 1.0f, brightness, frac);
+    }
+}
+
+void ReferenceRenderer::draw_intro_picture(FrameBuffer320x200& frame,
+                                           const ImageFrame& fragment, float mix,
+                                           float white, float brightness,
+                                           float wipe) const {
+    const float m = std::clamp(mix, 0.0f, 1.0f);
+    const float w = std::clamp(white, 0.0f, 1.0f);
+    // The wipe edge counts down 319 -> 0 (@0x484a). A row keeps showing background
+    // for that many pixels: from the left on even rows, from the right on odd ones.
+    const int32_t edge = static_cast<int32_t>(
+        std::lround(static_cast<double>(std::clamp(wipe, 0.0f, 1.0f)) *
+                    static_cast<double>(SCREEN_WIDTH - 1)));
+
+    for (std::size_t y = 0; y < fragment.height; ++y) {
+        const int32_t screen_y =
+            static_cast<int32_t>(fragment.y_offset) + static_cast<int32_t>(y);
+        const bool background_at_left = (screen_y % 2) == 0;
+        for (std::size_t x = 0; x < fragment.width; ++x) {
+            const int32_t screen_x =
+                static_cast<int32_t>(fragment.x_offset) + static_cast<int32_t>(x);
+            if (background_at_left
+                    ? screen_x < edge
+                    : screen_x >= static_cast<int32_t>(SCREEN_WIDTH) - edge) {
+                continue;
+            }
+            const uint8_t pixel_index = fragment.pixels[y * fragment.width + x];
+            if (fragment.transparent_zero && pixel_index == 0) continue;
+            if (pixel_index >= fragment.palette.colors.size()) continue;
+            RgbColor color = fragment.palette.colors[pixel_index];
+            if (pixel_index < fragment.palette_start.colors.size()) {
+                color =
+                    lerp_color(fragment.palette_start.colors[pixel_index], color, m);
+            }
+            color = lerp_color(color, RgbColor(252, 252, 252), w);
+            frame.set_pixel(static_cast<std::size_t>(screen_x),
+                            static_cast<std::size_t>(screen_y),
+                            scale_brightness(color, brightness));
+        }
     }
 }
 

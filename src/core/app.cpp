@@ -10,15 +10,42 @@ namespace {
 
 // The game's tick is the timer ISR's: PIT divisor 0x19E4 = 180.02 Hz, and the tick
 // counter ds:0x160c is bumped on 2 of every 10 interrupts (@0x3b06-0x3b14) = 36 Hz.
-// These intro timings are expressed in ticks, so they must use that rate; at the old
-// value of 70 the whole intro ran for about 77 seconds instead of 39, which is why
-// the main menu (and its music) seemed never to arrive.
 constexpr std::size_t TICKS_PER_SECOND = 36;
-constexpr std::size_t INTRO_SOUND_DELAY_TICKS = TICKS_PER_SECOND / 2;
-constexpr std::size_t INTRO_ANIM_START_TICKS = TICKS_PER_SECOND * 2;
-constexpr std::size_t INTRO_TITLE_HOLD_TICKS = TICKS_PER_SECOND * 4;
-constexpr std::size_t CREDIT_FRAME_TICKS = TICKS_PER_SECOND * 4;
 constexpr std::size_t MENU_IDLE_DEMO_TICKS = TICKS_PER_SECOND * 5;
+
+// ---- intro sequence (EXE routine @0x4575) ----------------------------------
+// Every value below is a literal tick count out of the disassembly. The helpers the
+// intro uses all measure in game ticks: 0x443d waits N of them, 0x4315 spreads a
+// palette fade over N of them, and both bail out the instant ds:0x54ac (the key
+// flag) is set -- which is why one keypress runs the whole remainder out at once.
+// Order: the background fades up -> pause -> intro.snd -> pause -> the anim.lzs
+// animation -> pause -> the title wipes in -> the title flashes white and settles
+// -> five credit screens -> everything fades out and the main menu takes over.
+constexpr std::size_t INTRO_BG_FADE_TICKS = 36;       // 0x4b72(pal, 1, 0x24) @0x4749
+constexpr std::size_t INTRO_PRE_SOUND_TICKS = 24;     // 0x443d(0x18)         @0x4756
+constexpr std::size_t INTRO_POST_SOUND_TICKS = 37;    // 0x443d(0x25)         @0x477b
+constexpr std::size_t INTRO_ANIM_GROUP_TICKS = 2;     // ds:0x160c >= 2       @0x47b1
+constexpr std::size_t INTRO_PRE_TITLE_TICKS = 72;     // 0x443d(0x48)         @0x4828
+constexpr std::size_t INTRO_TITLE_WIPE_TICKS = 18;    // the 0x12 divisor     @0x4851
+constexpr std::size_t INTRO_TITLE_FLASH_TICKS = 5;    // 0x4315(.., 5)        @0x4938
+constexpr std::size_t INTRO_TITLE_HOLD_TICKS = 9;     // 0x443d(9)            @0x4948
+constexpr std::size_t INTRO_TITLE_SETTLE_TICKS = 70;  // 0x4315(.., 0x46)     @0x495a
+constexpr std::size_t CREDIT_FADE_TICKS = 50;         // 0x4315(.., 0x32)     @0x49f6
+constexpr std::size_t CREDIT_HOLD_TICKS = 50;         // 0x443d(0x32)         @0x49fc
+constexpr std::size_t INTRO_OUTRO_FADE_TICKS = 36;    // 0x4b72(pal, 0, 0x24) @0x4a95
+// The credit loop runs i = 2..6 (@0x4989/@0x4995) over the seven (CMAP, CMAP, PICT)
+// sets loaded after the title, so it shows intro.lzs pictures 4..8. Sets 0 and 1 are
+// loaded but never displayed, and picture 9 is never even read.
+constexpr std::size_t CREDIT_FIRST_FRAME = 4;
+constexpr std::size_t CREDIT_FRAME_COUNT = 5;
+constexpr std::size_t CREDIT_FRAME_TICKS = CREDIT_FADE_TICKS * 2 + CREDIT_HOLD_TICKS;
+
+// Linear 0 -> 1 over `span` ticks, matching 0x4315's `100 * ticks / duration`.
+float ramp(std::size_t elapsed, std::size_t span) {
+    if (span == 0) return 1.0f;
+    return std::min(static_cast<float>(elapsed) / static_cast<float>(span), 1.0f);
+}
+
 constexpr std::size_t RENDER_ROWS_BEHIND = 3;
 constexpr std::size_t RENDER_ROWS_AHEAD = 7;
 // Song mapping, from every call to the song loader @0x57a8 (which early-returns if
@@ -202,11 +229,17 @@ void AttractModeApp::tick_intro(AppInput input, std::vector<AudioCommand>& audio
         audio.push_back(AudioCommand::play_song(INTRO_SONG_INDEX));
         intro_song_started_ = true;
     }
-    if (!intro_sample_started_ && intro_tick_ >= INTRO_SOUND_DELAY_TICKS) {
+    // intro.snd fires once the opening fade and its 24-tick pause are done (@0x4768),
+    // and only if no key has been seen yet.
+    const std::size_t sample_tick = INTRO_BG_FADE_TICKS + INTRO_PRE_SOUND_TICKS;
+    if (!intro_sample_started_ && intro_tick_ >= sample_tick) {
         audio.push_back(AudioCommand::play_intro_sample());
         intro_sample_started_ = true;
     }
-    if (intro_tick_ >= INTRO_SOUND_DELAY_TICKS && input.skip_requested()) {
+    // ds:0x54ac is cleared once at @0x4707 and then never again until the intro
+    // returns, so the first key press short-circuits every remaining stage and drops
+    // straight into the main menu (where the main song starts).
+    if (input.skip_requested()) {
         enter_main_menu(audio);
         return;
     }
@@ -521,59 +554,79 @@ GoMenuScene AttractModeApp::current_go_menu_scene() const {
     return scene;
 }
 
+std::size_t AttractModeApp::intro_anim_ticks() const {
+    return intro_anim_group_count_ * INTRO_ANIM_GROUP_TICKS;
+}
+
 IntroSequenceState AttractModeApp::current_intro_scene() const {
-    const std::size_t anim_frame_count = 100;
-    const std::size_t credit_frame_count = 8;
-    const std::size_t title_start = INTRO_ANIM_START_TICKS + anim_frame_count;
-    const std::size_t credits_start = title_start + INTRO_TITLE_HOLD_TICKS;
+    // Stage boundaries, in the order the routine runs them.
+    const std::size_t anim_start = INTRO_BG_FADE_TICKS + INTRO_PRE_SOUND_TICKS +
+                                   INTRO_POST_SOUND_TICKS;
+    const std::size_t anim_end = anim_start + intro_anim_ticks();
+    const std::size_t wipe_start = anim_end + INTRO_PRE_TITLE_TICKS;
+    const std::size_t flash_start = wipe_start + INTRO_TITLE_WIPE_TICKS;
+    const std::size_t hold_start = flash_start + INTRO_TITLE_FLASH_TICKS;
+    const std::size_t settle_start = hold_start + INTRO_TITLE_HOLD_TICKS;
+    const std::size_t credits_start = settle_start + INTRO_TITLE_SETTLE_TICKS;
+    const std::size_t credits_end =
+        credits_start + CREDIT_FRAME_TICKS * CREDIT_FRAME_COUNT;
 
-    const float background_brightness = std::min(
-        static_cast<float>(intro_tick_) / static_cast<float>(TICKS_PER_SECOND),
-        1.0f);
+    IntroSequenceState state{};
+    state.tick = intro_tick_;
 
-    std::optional<std::size_t> anim_frame_index;
-    if (intro_tick_ >= INTRO_ANIM_START_TICKS) {
-        const std::size_t index = intro_tick_ - INTRO_ANIM_START_TICKS;
-        if (index < anim_frame_count) {
-            anim_frame_index = index;
-        }
+    // The screen fades up from black at the start and back down at the very end.
+    state.background_brightness = ramp(intro_tick_, INTRO_BG_FADE_TICKS);
+    if (intro_tick_ >= credits_end) {
+        state.background_brightness =
+            1.0f - ramp(intro_tick_ - credits_end, INTRO_OUTRO_FADE_TICKS);
     }
 
-    float title_progress = 0.0f;
-    if (intro_tick_ >= title_start) {
-        const std::size_t ticks = intro_tick_ - title_start;
-        title_progress = std::min(static_cast<float>(ticks) /
-                                      (static_cast<float>(TICKS_PER_SECOND) * 3.5f),
-                                  1.0f);
-    }
-
-    const std::size_t credit_ticks =
-        intro_tick_ >= credits_start ? intro_tick_ - credits_start : 0;
-    std::optional<std::size_t> credit_frame_index;
-    if (intro_tick_ >= credits_start) {
-        credit_frame_index =
-            std::min(credit_ticks / CREDIT_FRAME_TICKS, credit_frame_count - 1);
-    }
-
-    float credit_alpha;
-    if (intro_tick_ < credits_start) {
-        credit_alpha = 0.0f;
+    // Groups accumulate: whatever has been painted stays painted.
+    if (intro_tick_ <= anim_start) {
+        state.anim_groups_drawn = 0;
     } else {
-        const std::size_t seq = credit_ticks % CREDIT_FRAME_TICKS;
-        if (seq < TICKS_PER_SECOND) {
-            credit_alpha =
-                static_cast<float>(seq) / static_cast<float>(TICKS_PER_SECOND);
-        } else if (seq > TICKS_PER_SECOND * 3) {
-            credit_alpha = static_cast<float>(CREDIT_FRAME_TICKS - seq) /
-                           static_cast<float>(TICKS_PER_SECOND);
+        state.anim_groups_drawn =
+            std::min((intro_tick_ - anim_start) / INTRO_ANIM_GROUP_TICKS,
+                     intro_anim_group_count_);
+    }
+
+    state.title_visible = intro_tick_ >= wipe_start;
+    state.title_wipe = 1.0f;
+    if (intro_tick_ >= wipe_start) {
+        state.title_wipe = 1.0f - ramp(intro_tick_ - wipe_start, INTRO_TITLE_WIPE_TICKS);
+    }
+    if (intro_tick_ < flash_start) {
+        state.title_white = 0.0f;
+        state.title_mix = 0.0f;
+    } else if (intro_tick_ < hold_start) {
+        state.title_white = ramp(intro_tick_ - flash_start, INTRO_TITLE_FLASH_TICKS);
+        state.title_mix = 0.0f;
+    } else if (intro_tick_ < settle_start) {
+        state.title_white = 1.0f;
+        state.title_mix = 0.0f;
+    } else {
+        state.title_white =
+            1.0f - ramp(intro_tick_ - settle_start, INTRO_TITLE_SETTLE_TICKS);
+        state.title_mix = 1.0f;
+    }
+
+    if (intro_tick_ >= credits_start && intro_tick_ < credits_end) {
+        const std::size_t elapsed = intro_tick_ - credits_start;
+        const std::size_t index = elapsed / CREDIT_FRAME_TICKS;
+        const std::size_t within = elapsed % CREDIT_FRAME_TICKS;
+        state.credit_frame_index = CREDIT_FIRST_FRAME + index;
+        if (within < CREDIT_FADE_TICKS) {
+            state.credit_mix = ramp(within, CREDIT_FADE_TICKS);
+        } else if (within < CREDIT_FADE_TICKS + CREDIT_HOLD_TICKS) {
+            state.credit_mix = 1.0f;
         } else {
-            credit_alpha = 1.0f;
+            state.credit_mix =
+                1.0f - ramp(within - CREDIT_FADE_TICKS - CREDIT_HOLD_TICKS,
+                            CREDIT_FADE_TICKS);
         }
     }
 
-    return IntroSequenceState{intro_tick_,      background_brightness,
-                              title_progress,   anim_frame_index,
-                              credit_frame_index, credit_alpha};
+    return state;
 }
 
 DemoPlaybackState AttractModeApp::current_demo_scene() const {
@@ -635,10 +688,11 @@ DemoPlaybackState AttractModeApp::build_play_scene(const GameplaySession& sessio
 }
 
 std::size_t AttractModeApp::final_credit_end_tick() const {
-    const std::size_t anim_frame_count = 100;
-    const std::size_t credit_frame_count = 8;
-    return INTRO_ANIM_START_TICKS + anim_frame_count + INTRO_TITLE_HOLD_TICKS +
-           CREDIT_FRAME_TICKS * credit_frame_count;
+    return INTRO_BG_FADE_TICKS + INTRO_PRE_SOUND_TICKS + INTRO_POST_SOUND_TICKS +
+           intro_anim_ticks() + INTRO_PRE_TITLE_TICKS + INTRO_TITLE_WIPE_TICKS +
+           INTRO_TITLE_FLASH_TICKS + INTRO_TITLE_HOLD_TICKS +
+           INTRO_TITLE_SETTLE_TICKS + CREDIT_FRAME_TICKS * CREDIT_FRAME_COUNT +
+           INTRO_OUTRO_FADE_TICKS;
 }
 
 } // namespace skyroads::core

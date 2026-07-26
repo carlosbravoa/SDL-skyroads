@@ -112,6 +112,19 @@ static void test_baked_tables_match_exe(const SkyroadsExe& exe) {
     for (std::size_t i = 0; i < skyroads::core::DOS_DRAW_DISPATCH_TARGETS.size(); ++i) {
         CHECK_EQ(entries[i].target, skyroads::core::DOS_DRAW_DISPATCH_TARGETS[i]);
     }
+
+    // Shade -> palette LUT at DS:0x0322, four bytes per shade. Byte 0 feeds the
+    // forward rasterizer (the road's left half) and byte 1 the reverse one (the
+    // mirrored right half); they differ, and that is what gives walls and tubes
+    // their second shade band.
+    const std::size_t lut_base = 0x66E0 + 0x0322;
+    CHECK_TRUE(exe.image.size() >= lut_base + skyroads::core::DOS_SHADE_LUT_SIZE * 4);
+    for (std::size_t shade = 0; shade < skyroads::core::DOS_SHADE_LUT_SIZE; ++shade) {
+        CHECK_EQ(exe.image[lut_base + shade * 4],
+                 skyroads::core::DOS_SHADE_LUT_FORWARD[shade]);
+        CHECK_EQ(exe.image[lut_base + shade * 4 + 1],
+                 skyroads::core::DOS_SHADE_LUT_REVERSE[shade]);
+    }
 }
 
 // ---- gameplay simulation ---------------------------------------------------

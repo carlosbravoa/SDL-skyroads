@@ -4,6 +4,8 @@
 #include "ymfm_opl.h"
 
 #include <algorithm>
+#include <deque>
+#include <utility>
 
 namespace skyroads::audio {
 namespace {
@@ -24,6 +26,9 @@ struct OplChip::Impl {
     double phase = 0.0;
     float prev = 0.0f;
     float next = 0.0f;
+    // Register writes waiting for their settling delay; one is applied per chip
+    // sample, so consecutive writes land about 20 us apart as they do on hardware.
+    std::deque<std::pair<uint8_t, uint8_t>> pending;
 
     explicit Impl(uint32_t rate)
         : chip(interface), output_rate(rate == 0 ? 48000 : rate) {
@@ -32,6 +37,12 @@ struct OplChip::Impl {
     }
 
     float generate_chip_sample() {
+        if (!pending.empty()) {
+            const auto write = pending.front();
+            pending.pop_front();
+            chip.write_address(write.first);
+            chip.write_data(write.second);
+        }
         ymfm::ym3812::output_data out;
         chip.generate(&out, 1);
         // ymfm returns roughly 16-bit-ish signed data for one OPL2 output channel.
@@ -50,14 +61,14 @@ OplChip& OplChip::operator=(OplChip&&) noexcept = default;
 
 void OplChip::reset() {
     impl_->chip.reset();
+    impl_->pending.clear();
     impl_->phase = 0.0;
     impl_->prev = 0.0f;
     impl_->next = impl_->generate_chip_sample();
 }
 
 void OplChip::write(uint8_t reg, uint8_t value) {
-    impl_->chip.write_address(reg);
-    impl_->chip.write_data(value);
+    impl_->pending.emplace_back(reg, value);
 }
 
 float OplChip::next_sample() {

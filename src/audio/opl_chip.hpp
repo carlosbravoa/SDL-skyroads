@@ -24,6 +24,14 @@ public:
 
     void reset();
     // One OPL register write, exactly as the game would do to ports 0x388/0x389.
+    //
+    // The write is QUEUED rather than applied on the spot, and the queue drains one
+    // entry per chip sample. That reproduces the settling delay the driver spends on
+    // every write (@0x5876 does six dummy port reads after the address and 35 after
+    // the data, tens of microseconds in which the chip keeps clocking). It matters:
+    // a key off immediately followed by a key on is only a retrigger if the chip
+    // actually advances in between, and the songs lean on that -- song 0 keys the
+    // hi-hat on 1408 times but off only 14.
     void write(uint8_t reg, uint8_t value);
     // One sample at the configured output rate, resampled from the chip's native
     // rate (clock/72, about 49716 Hz), normalised to roughly [-1, 1].

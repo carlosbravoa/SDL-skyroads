@@ -173,6 +173,14 @@ private:
                                    const ImageArchive& archive,
                                    std::size_t frame_index, float progress,
                                    float brightness) const;
+    // Draws a picture under the intro's palette animation: `mix` slides from the
+    // frame's first CMAP to its second, `white` flashes the result out to full
+    // intensity, and `wipe` is the fraction of each row still left as background by
+    // the interlaced title wipe (even rows uncover from the right, odd from the
+    // left, exactly as the two 0x4184 calls @0x489b/@0x48b1 do).
+    void draw_intro_picture(FrameBuffer320x200& frame, const ImageFrame& fragment,
+                            float mix, float white, float brightness,
+                            float wipe) const;
     void draw_fragment(FrameBuffer320x200& frame, const ImageFrame& fragment,
                        float alpha, float brightness,
                        float horizontal_fraction) const;
