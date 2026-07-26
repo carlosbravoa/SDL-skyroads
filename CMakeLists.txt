@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(skyroads_c CXX)
+project(skyroads_c VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -82,6 +82,12 @@ add_test(NAME renderer COMMAND test_renderer)
 add_executable(test_audio tests/test_audio.cpp)
 target_link_libraries(test_audio PRIVATE skyroads_audio)
 add_test(NAME audio COMMAND test_audio)
+
+# The tests read the real game data. Point them at it explicitly so they pass from any
+# build directory, not just one nested inside the source tree (check.hpp otherwise
+# falls back to ../skyroads-assets). SKYROADS_ASSETS still overrides.
+set_tests_properties(data core renderer audio PROPERTIES
+  ENVIRONMENT "SKYROADS_ASSETS=${CMAKE_SOURCE_DIR}/skyroads-assets")
 
 # ---- CLI verifier ----------------------------------------------------------
 add_executable(skyroads-cli src/cli/main.cpp)
