@@ -137,6 +137,11 @@ lookup tables recovered from the original executable (the shade LUT, the shadow
 silhouettes, the digit glyphs and the draw-dispatch table) are baked into the
 source so the port needs no copy of the EXE at runtime.
 
+The application icon (`snap/gui/skyroads-native.png`) is a screenshot of this
+port rendering SkyRoads' own title screen, so it depicts Bluemoon's artwork —
+included as the application's identity in the same way a store listing shows
+game screenshots.
+
 ## Acknowledgements
 
 - **Bluemoon Interactive** — creators of SkyRoads, released as freeware.
