@@ -115,6 +115,28 @@ SKYROADS_ASSETS="$PWD/skyroads-assets" ctest --test-dir build --output-on-failur
 `data`, `core`, and `audio` work with any genuine SkyRoads data set; the
 renderer and EXE-validation checks expect the original 30472-byte build.
 
+## License
+
+This port is **MIT licensed** — see [LICENSE](LICENSE). Do what you like with
+it; keep the copyright notice.
+
+Two things in the tree are not covered by that:
+
+- `third_party/ymfm/` is Aaron Giles' YM3812 emulation, **BSD-3-Clause**. Its
+  own `LICENSE` must stay with those files. BSD-3 and MIT are compatible.
+- The 8x8 text font in `src/core/dos_font.hpp` is the IBM VGA ROM bitmap, which
+  the DOS game asked the BIOS for and a modern host has to supply itself. The
+  glyphs were taken from the kbd project's `Lat15-VGA8` console font. This
+  bitmap is reproduced widely and generally treated as unencumbered, but the
+  provenance is recorded in that header in case you would rather substitute an
+  explicitly public-domain reconstruction.
+
+The game data is **not** covered either, and is not distributed here — SkyRoads
+belongs to Bluemoon Interactive, who released it as freeware. A handful of
+lookup tables recovered from the original executable (the shade LUT, the shadow
+silhouettes, the digit glyphs and the draw-dispatch table) are baked into the
+source so the port needs no copy of the EXE at runtime.
+
 ## Acknowledgements
 
 - **Bluemoon Interactive** — creators of SkyRoads, released as freeware.
