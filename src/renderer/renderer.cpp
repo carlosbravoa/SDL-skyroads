@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>  // RVSTACK: memset span fills
 #include <map>
 #include <utility>
 
@@ -306,10 +307,14 @@ void draw_trekdat_span(FrameBuffer320x200& frame, int32_t x, int32_t y,
     const uint8_t index = static_cast<uint8_t>(PAL_ROAD_BASE + palette_index);
     const int32_t x0 = std::max(x, 0);
     const int32_t x1 = std::min(x + width, static_cast<int32_t>(SCREEN_WIDTH));
-    for (int32_t px = x0; px < x1; ++px) {
-        frame.set_pixel(static_cast<std::size_t>(px), static_cast<std::size_t>(y),
-                        index, palette_index);
-    }
+    if (x1 <= x0) return;
+    // RVSTACK: spans are single-index horizontal runs — write them at memset
+    // speed. The bounds-checked per-pixel path costs whole frames at 74 MHz.
+    const std::size_t off =
+        static_cast<std::size_t>(y) * FRAMEBUFFER_WIDTH + static_cast<std::size_t>(x0);
+    std::memset(frame.pixels.data() + off, index, static_cast<std::size_t>(x1 - x0));
+    std::memset(frame.shade_plane.data() + off, palette_index,
+                static_cast<std::size_t>(x1 - x0));
 }
 
 void draw_dos_shape(FrameBuffer320x200& frame, const TrekdatShape& shape,
@@ -1783,16 +1788,35 @@ void ReferenceRenderer::draw_fragment(FrameBuffer320x200& frame,
                                       float horizontal_fraction) const {
     const std::size_t draw_width = static_cast<std::size_t>(std::floor(
         static_cast<float>(fragment.width) * std::clamp(horizontal_fraction, 0.0f, 1.0f)));
+    // RVSTACK: this is the backdrop/dashboard blit — the biggest per-frame
+    // pixel loop after the road pass. Hoist the invariants (palette size and
+    // the 0xFF slot ceiling fold into one bound; row pointers replace the
+    // bounds-checked set_pixel) — behaviour is identical, the console frame
+    // cost is not.
+    const std::size_t max_index = std::min<std::size_t>(
+        fragment.palette.colors.size(),
+        palette_base <= 0xFF ? 0x100 - palette_base : 0);
     for (std::size_t y = 0; y < fragment.height; ++y) {
-        for (std::size_t x = 0; x < draw_width; ++x) {
-            const uint8_t pixel_index = fragment.pixels[y * fragment.width + x];
-            if (fragment.transparent_zero && pixel_index == 0) continue;
-            if (pixel_index >= fragment.palette.colors.size()) continue;
-            const std::size_t slot = palette_base + pixel_index;
-            if (slot > 0xFF) continue;
-            frame.set_pixel(static_cast<std::size_t>(fragment.x_offset) + x,
-                            static_cast<std::size_t>(fragment.y_offset) + y,
-                            static_cast<uint8_t>(slot));
+        const std::size_t sy = static_cast<std::size_t>(fragment.y_offset) + y;
+        if (sy >= FRAMEBUFFER_HEIGHT) continue;
+        const std::size_t sx0 = static_cast<std::size_t>(fragment.x_offset);
+        if (sx0 >= FRAMEBUFFER_WIDTH) continue;
+        const std::size_t run =
+            std::min(draw_width, FRAMEBUFFER_WIDTH - sx0);
+        const uint8_t* src = fragment.pixels.data() + y * fragment.width;
+        uint8_t* dst = frame.pixels.data() + sy * FRAMEBUFFER_WIDTH + sx0;
+        if (fragment.transparent_zero) {
+            for (std::size_t x = 0; x < run; ++x) {
+                const uint8_t p = src[x];
+                if (p != 0 && p < max_index)
+                    dst[x] = static_cast<uint8_t>(palette_base + p);
+            }
+        } else {
+            for (std::size_t x = 0; x < run; ++x) {
+                const uint8_t p = src[x];
+                if (p < max_index)
+                    dst[x] = static_cast<uint8_t>(palette_base + p);
+            }
         }
     }
 }
@@ -2197,10 +2221,12 @@ void ReferenceRenderer::draw_topdown_map(FrameBuffer320x200& frame,
         (scene.ship.x_position - left_edge) /
             (LEVEL_TILE_STRIDE_X * static_cast<double>(ROAD_COLUMNS)),
         0.0, 0.999);
+    // RVSTACK: explicit template args — int32_t is `long` on rv32 newlib,
+    // so max(int32_t, int) has no deduction.
     const int32_t ship_x =
-        x + 4 + static_cast<int32_t>(ship_col * static_cast<double>(std::max(w - 8, 1)));
+        x + 4 + static_cast<int32_t>(ship_col * static_cast<double>(std::max<int32_t>(w - 8, 1)));
     const int32_t ship_y =
-        y + 4 + static_cast<int32_t>(ship_row * static_cast<double>(std::max(h - 8, 1)));
+        y + 4 + static_cast<int32_t>(ship_row * static_cast<double>(std::max<int32_t>(h - 8, 1)));
     frame.fill_rect(ship_x - 2, ship_y - 2, 5, 5,
                     scratch.index_for(RgbColor(112, 214, 255)));
     if (large) {
