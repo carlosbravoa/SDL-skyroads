@@ -1,0 +1,87 @@
+name: skyroads-native
+base: core24
+adopt-info: skyroads
+summary: Faithful native port of the 1993 DOS game SkyRoads
+description: |
+  A C++17/SDL2 reimplementation of SkyRoads, the 1993 DOS game by Bluemoon
+  Interactive, rebuilt by reverse-engineering the original executable: the
+  physics, the road renderer, the OPL2 music and the game flow all follow what
+  the original actually did rather than an approximation of it.
+
+  This package contains NO game data. SkyRoads is freeware, but its files are
+  not redistributed here -- you supply your own copy.
+
+  Put the SkyRoads files (ROADS.LZS, TREKDAT.LZS, MUZAX.LZS, the WORLD*.LZS set
+  and the rest) in:
+
+    ~/snap/skyroads-native/common/gamedata
+
+  That folder needs no extra permissions and is created on first run. A folder
+  under your home directory such as ~/Games/SkyRoads also works, as does passing
+  the path directly:
+
+    skyroads-native /path/to/skyroads
+
+  If the game data cannot be found, the game says so and lists everywhere it
+  looked.
+
+confinement: strict
+grade: stable
+
+platforms:
+  amd64:
+  arm64:
+
+apps:
+  skyroads-native:
+    command: bin/skyroads-launch
+    extensions: [gpu]
+    plugs:
+      - wayland
+      - x11
+      - opengl
+      - audio-playback
+      - desktop
+      # Lets the game read a copy kept in the home directory, e.g. ~/Games/SkyRoads.
+      - home
+      # For a copy on a USB stick or other mounted media. Does NOT auto-connect:
+      #   sudo snap connect skyroads-native:removable-media
+      - removable-media
+
+parts:
+  skyroads:
+    plugin: cmake
+    source: .
+    cmake-parameters:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_INSTALL_PREFIX=/usr
+    build-packages:
+      - g++
+      - pkg-config
+      - libsdl2-dev
+    stage-packages:
+      - libsdl2-2.0-0
+      - libpulse0
+    override-pull: |
+      craftctl default
+      craftctl set version="$(git describe --tags --always 2>/dev/null || echo 1.0.0)"
+      # `source: .` copies the working directory as it is on disk, which would sweep
+      # in the player's own game data and the reverse-engineering workspace even
+      # though both are gitignored. Neither may be redistributed, so drop them here
+      # rather than trusting that they happen to be absent.
+      rm -rf "$CRAFT_PART_SRC/skyroads-assets" \
+             "$CRAFT_PART_SRC/skyroads-assets-backup" \
+             "$CRAFT_PART_SRC/re" \
+             "$CRAFT_PART_SRC/screenshots" \
+             "$CRAFT_PART_SRC/CLAUDE.md"
+    override-build: |
+      craftctl default
+      # The project has no install target: the host binary is the only artefact.
+      install -Dm755 "$CRAFT_PART_BUILD/skyroads-sdl" \
+        "$CRAFT_PART_INSTALL/bin/skyroads-sdl"
+
+  launcher:
+    plugin: dump
+    source: snap/local
+    organize:
+      skyroads-launch: bin/skyroads-launch

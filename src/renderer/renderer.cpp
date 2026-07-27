@@ -8,6 +8,7 @@
 #include "core/dos_font.hpp"
 #include "core/dos_render_tables.hpp"
 #include "core/planner.hpp"
+#include "data/assets.hpp"
 #include "data/dashboard.hpp"
 #include "data/trekdat.hpp"
 
@@ -1025,7 +1026,7 @@ void FrameBuffer320x200::blend_pixel(std::size_t x, std::size_t y, RgbColor colo
 AttractModeAssets AttractModeAssets::load_from_root(const std::string& source_root) {
     auto path = [&](const std::string& name) {
         if (!source_root.empty() && source_root.back() == '/') return source_root + name;
-        return source_root + "/" + name;
+        return skyroads::data::asset_path(source_root, name);
     };
     AttractModeAssets a;
     for (int index = 0; index <= 9; ++index) {

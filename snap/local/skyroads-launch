@@ -1,0 +1,29 @@
+#!/bin/sh
+# Launch wrapper for the confined snap. Runs after the gpu extension's command-chain,
+# so the OpenGL environment is already set up; what is left is audio and paths.
+
+# libpulse loads libpulsecommon from a pulseaudio/ subdirectory that is not on the
+# default library path, so SDL fails to start with a missing-object error.
+for d in "$SNAP"/usr/lib/*/pulseaudio; do
+	[ -d "$d" ] && LD_LIBRARY_PATH="$d${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+done
+export LD_LIBRARY_PATH
+
+# Use PulseAudio rather than ALSA, which has no configuration inside the sandbox.
+export SDL_AUDIODRIVER=pulseaudio
+
+# snapd points XDG_RUNTIME_DIR at a per-snap subdirectory, but the socket exposed by
+# the audio-playback interface is one level up.
+if [ -z "$PULSE_SERVER" ]; then
+	uid="$(id -u 2>/dev/null)"
+	[ -n "$uid" ] && export PULSE_SERVER="unix:/run/user/$uid/pulse/native"
+fi
+
+# The drop spot for the player's own copy of the game. Always readable and writable
+# with no interfaces connected, which is why it is the default.
+mkdir -p "$SNAP_USER_COMMON/gamedata"
+
+# Writable state (skyroads.cfg) belongs here, not beside the game data.
+cd "$SNAP_USER_COMMON" || exit 1
+
+exec "$SNAP/bin/skyroads-sdl" "$@"

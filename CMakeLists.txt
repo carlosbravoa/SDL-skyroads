@@ -16,6 +16,7 @@ include_directories(${CMAKE_SOURCE_DIR}/src)
 
 # ---- data library: zero-dependency, integer-exact asset loaders ----------
 add_library(skyroads_data
+  src/data/assets.cpp
   src/data/byteio.cpp
   src/data/compression.cpp
   src/data/cfg.cpp

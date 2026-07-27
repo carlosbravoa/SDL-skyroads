@@ -1,5 +1,7 @@
 #include "audio/audio.hpp"
 
+#include "data/assets.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -529,7 +531,7 @@ void MuzaxPlayer::play_note(std::size_t channel, uint8_t note, OplSynth& synth) 
 AttractAudioAssets AttractAudioAssets::load_from_root(const std::string& source_root) {
     auto path = [&](const std::string& name) {
         if (!source_root.empty() && source_root.back() == '/') return source_root + name;
-        return source_root + "/" + name;
+        return skyroads::data::asset_path(source_root, name);
     };
     AttractAudioAssets a;
     a.intro = skyroads::data::load_intro_snd_path(path("INTRO.SND"));

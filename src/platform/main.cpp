@@ -5,6 +5,8 @@
 // key edge/hold latching, and queued-audio watermarking live here.
 #include <SDL.h>
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -14,6 +16,7 @@
 
 #include "audio/audio.hpp"
 #include "core/core.hpp"
+#include "data/assets.hpp"
 #include "data/config.hpp"
 #include "data/data.hpp"
 #include "renderer/renderer.hpp"
@@ -270,9 +273,49 @@ void print_controls(const std::string& source_root) {
     std::printf("  Q          quit\n");
 }
 
+
+// The port ships no game data. When none can be found, say so somewhere the player
+// will actually see it: on the terminal if there is one, and in a message box, since
+// a packaged build is usually launched from a desktop icon with no console attached.
+void report_missing_assets(const std::string& explicit_root) {
+    std::string message;
+    if (!explicit_root.empty()) {
+        message = "No SkyRoads game data in:\n  " + explicit_root +
+                  "\n\nThat folder has no ROADS.LZS.";
+    } else {
+        message = "SkyRoads game data not found.\n\nCopy your SkyRoads files into:\n";
+        const char* home = std::getenv("HOME");
+        const char* snap_common = std::getenv("SNAP_USER_COMMON");
+        if (snap_common != nullptr) {
+            message += std::string("  ") + snap_common + "/gamedata\n";
+        } else if (home != nullptr) {
+            message += std::string("  ") + home + "/Games/SkyRoads\n";
+        }
+        message += "\nOr start it with the folder as an argument:\n";
+        message += "  skyroads-sdl /path/to/skyroads\n";
+        message += "\nSearched:\n";
+        for (const std::string& path : data::asset_search_paths()) {
+            message += "  " + path + "\n";
+        }
+    }
+    message +=
+        "\nThe port contains no game files. SkyRoads is freeware from Bluemoon;\n"
+        "see the README for where to get it.";
+
+    std::fprintf(stderr, "%s\n", message.c_str());
+    // Only pop a window when there is no terminal to have read that. Launched from a
+    // shell the message above is enough, and a modal box would just block the prompt.
+    if (isatty(STDERR_FILENO)) return;
+    if (SDL_Init(SDL_INIT_VIDEO) == 0) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "SkyRoads: game data not found",
+                                 message.c_str(), nullptr);
+        SDL_Quit();
+    }
+}
+
 int run(const std::string& source_root) {
-    auto roads = data::load_roads_lzs_path(source_root + "/ROADS.LZS");
-    auto demo = data::load_demo_rec_path(source_root + "/DEMO.REC");
+    auto roads = data::load_roads_lzs_path(data::asset_path(source_root, "ROADS.LZS"));
+    auto demo = data::load_demo_rec_path(data::asset_path(source_root, "DEMO.REC"));
     auto levels = data::levels_from_roads_archive(roads);
     if (levels.empty()) {
         std::fprintf(stderr, "error: ROADS.LZS did not contain any playable levels\n");
@@ -293,8 +336,12 @@ int run(const std::string& source_root) {
         app.set_intro_anim_group_count(anim_groups);
     }
 
-    // Progress lives in skyroads.cfg next to the game data, as in the original.
-    const std::string config_path = source_root + "/skyroads.cfg";
+    // Progress lives in skyroads.cfg. The original kept it beside the game data, but
+    // that directory may be read-only, shared, or inside a package's read-only area,
+    // so writable state goes wherever the platform says it belongs (under a snap,
+    // $SNAP_USER_COMMON). Outside a package this is still the asset directory.
+    const std::string config_path =
+        data::writable_state_dir(source_root) + "/skyroads.cfg";
     data::GameConfig config = data::load_game_config(config_path);
     {
         // The counts are 16-bit words in the file and in the game, so they survive a
@@ -460,15 +507,28 @@ int run(const std::string& source_root) {
 } // namespace
 
 int main(int argc, char** argv) {
-    std::string source_root = ".";
+    std::string explicit_root;
     if (argc > 1) {
         const std::string first = argv[1];
         if (first == "-h" || first == "--help" || argc > 2) {
-            std::fprintf(stderr, "usage: skyroads-sdl [source_root]\n");
+            std::fprintf(stderr,
+                         "usage: skyroads-sdl [game-data-folder]\n"
+                         "\nWith no argument the game data is looked for in, in order:\n");
+            for (const std::string& path : data::asset_search_paths()) {
+                std::fprintf(stderr, "  %s\n", path.c_str());
+            }
             return first == "-h" || first == "--help" ? 0 : 1;
         }
-        source_root = first;
+        explicit_root = first;
     }
+
+    const std::string source_root = data::find_asset_directory(explicit_root);
+    if (source_root.empty()) {
+        report_missing_assets(explicit_root);
+        return 1;
+    }
+    std::printf("game data: %s\n", source_root.c_str());
+
     try {
         return run(source_root);
     } catch (const data::Error& error) {
