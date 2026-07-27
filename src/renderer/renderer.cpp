@@ -1452,12 +1452,9 @@ void ReferenceRenderer::render_go_menu(RenderedFrame& out,
     stroke_rect(frame, cursor_x - 3, cursor_y - 1, 37, 9, PAL_GOMENU_CURSOR);
 }
 
-void ReferenceRenderer::render_play_scene(RenderedFrame& out,
-                                          const DemoPlaybackState& scene) const {
-    FrameBuffer320x200& frame = out.frame;
-    Palette256& pal = out.palette;
-    const DerivedShipVisualState ship_visual = derive_ship_visual_state(scene);
-    const ShipScreenPlacement ship_placement = ship_screen_placement(scene, ship_visual);
+// RVSTACK: palette assembly + world pick, shared with the incremental path.
+void ReferenceRenderer::assemble_play_palette(Palette256& pal,
+                                              const DemoPlaybackState& scene) const {
     // Assemble the gameplay DAC. Every shipped road palette has a black entry 0,
     // which doubles as the clear/sky colour behind the backdrop's holes.
     pal_band_fill(pal, PAL_ROAD_BASE, scene.road_palette);
@@ -1474,13 +1471,29 @@ void ReferenceRenderer::render_play_scene(RenderedFrame& out,
             pal.colors[PAL_DASH_BASE + i] = dashboard_colors()[i];
         }
     }
-    const ImageArchive* world = nullptr;
-    if (scene.world_index < assets_.worlds.size()) world = &assets_.worlds[scene.world_index];
-    else if (!assets_.worlds.empty()) world = &assets_.worlds.front();
+    const ImageArchive* world = play_world(scene);
     if (world && !world->frames.empty() && !world->frames[0].empty()) {
         pal_band_fill(pal, PAL_WORLD_BASE,
                       world->frames[0].front().palette.colors);
     }
+}
+
+const ImageArchive* ReferenceRenderer::play_world(
+    const DemoPlaybackState& scene) const {
+    if (scene.world_index < assets_.worlds.size())
+        return &assets_.worlds[scene.world_index];
+    if (!assets_.worlds.empty()) return &assets_.worlds.front();
+    return nullptr;
+}
+
+void ReferenceRenderer::render_play_scene(RenderedFrame& out,
+                                          const DemoPlaybackState& scene) const {
+    FrameBuffer320x200& frame = out.frame;
+    Palette256& pal = out.palette;
+    const DerivedShipVisualState ship_visual = derive_ship_visual_state(scene);
+    const ShipScreenPlacement ship_placement = ship_screen_placement(scene, ship_visual);
+    assemble_play_palette(pal, scene);
+    const ImageArchive* world = play_world(scene);
 
     frame.clear(0);
     if (world) draw_archive_frame(frame, *world, 0, PAL_WORLD_BASE);
@@ -1514,6 +1527,116 @@ void ReferenceRenderer::render_play_scene(RenderedFrame& out,
         draw_rom_text(frame, skyroads::core::dos_text_centered_x(text.size()), 80, text,
                       static_cast<uint8_t>(PAL_DASH_BASE + 7));
     }
+}
+
+// RVSTACK: the console play path — see PlaySceneCache in the header. Every
+// draw call below is the pure path's, in the pure path's order; the only
+// difference is what the frame starts from: instead of clear+backdrop+
+// dashboard (128 KB of writes plus two full blits, every frame), the bands
+// the previous frame dirtied are copied back from the cached underlay.
+// Dirt inventory (each item's restore): spans + shadow + banner are clipped
+// to the road band rows [HORIZON_Y, VIEW_BOTTOM_Y) -> band copy; gauges,
+// warn label, gravity digits live in the dashboard band -> band copy (done
+// AFTER the ship draw, which is also what hides ship-sprite spill exactly
+// like the pure path's dashboard redraw does); the ship sprite alone can
+// rise above the horizon -> its previous rect is restored explicitly.
+// The shade plane is only ever READ inside the road band (the shadow is
+// band-clipped), so only that band's shades need re-zeroing.
+namespace {
+
+void restore_rows(FrameBuffer320x200& f, const FrameBuffer320x200& u,
+                  std::size_t y0, std::size_t y1) {
+    std::memcpy(f.pixels.data() + y0 * FRAMEBUFFER_WIDTH,
+                u.pixels.data() + y0 * FRAMEBUFFER_WIDTH,
+                (y1 - y0) * FRAMEBUFFER_WIDTH);
+}
+
+}  // namespace
+
+void ReferenceRenderer::render_play_scene_incremental(
+    RenderedFrame& out, PlaySceneCache& c, const DemoPlaybackState& scene) const {
+    const bool road_changed = !c.valid || c.world_index != scene.world_index ||
+                              c.road_palette != scene.road_palette;
+    if (road_changed) {
+        assemble_play_palette(c.palette, scene);
+        // Underlay = clear + backdrop ONLY. The dashboard art is NOT baked
+        // in: its cockpit frame rises above DASHBOARD_TOP, and the pure path
+        // draws it AFTER the ship — over an exploding ship's low pixels. It
+        // is re-blitted per frame below, at the same point in the order.
+        c.underlay.clear(0);
+        const ImageArchive* world = play_world(scene);
+        if (world) draw_archive_frame(c.underlay, *world, 0, PAL_WORLD_BASE);
+        c.world_index = scene.world_index;
+        c.road_palette = scene.road_palette;
+        c.valid = true;
+        c.frame_primed = false;
+    }
+    out.palette = c.palette;
+    FrameBuffer320x200& f = out.frame;
+    const FrameBuffer320x200& u = c.underlay;
+
+    if (!c.frame_primed) {
+        f.pixels = u.pixels;
+        std::memset(f.shade_plane.data(), 0, f.shade_plane.size());
+        c.frame_primed = true;
+    } else {
+        // Previous ship sprite, wherever it was (it may sit above the band).
+        const std::size_t sy0 = static_cast<std::size_t>(std::max(c.ship_y0, 0));
+        const std::size_t sy1 = static_cast<std::size_t>(std::clamp(
+            c.ship_y1, 0, static_cast<int32_t>(FRAMEBUFFER_HEIGHT)));
+        const std::size_t sx0 = static_cast<std::size_t>(std::max(c.ship_x0, 0));
+        const std::size_t sx1 = static_cast<std::size_t>(std::clamp(
+            c.ship_x1, 0, static_cast<int32_t>(FRAMEBUFFER_WIDTH)));
+        for (std::size_t y = sy0; y < sy1; ++y) {
+            std::memcpy(f.pixels.data() + y * FRAMEBUFFER_WIDTH + sx0,
+                        u.pixels.data() + y * FRAMEBUFFER_WIDTH + sx0, sx1 - sx0);
+        }
+        restore_rows(f, u, HORIZON_Y, VIEW_BOTTOM_Y);
+        std::memset(f.shade_plane.data() + HORIZON_Y * FRAMEBUFFER_WIDTH, 0,
+                    (VIEW_BOTTOM_Y - HORIZON_Y) * FRAMEBUFFER_WIDTH);
+    }
+
+    const DerivedShipVisualState ship_visual = derive_ship_visual_state(scene);
+    const ShipScreenPlacement ship_placement = ship_screen_placement(scene, ship_visual);
+
+    const bool drew_dos_road = draw_demo_rows_before_ship(f, scene);
+    if (!drew_dos_road) {
+        // No TREKDAT (never with shipped data): the fallback repaints
+        // arbitrary pixels, so hand the frame to the pure path outright.
+        c.frame_primed = false;
+        render_play_scene(out, scene);
+        return;
+    }
+    draw_ship_sprite(f, scene.frame_index, ship_visual, ship_placement);
+    draw_ship_shadow(f, ship_visual, ship_placement);
+    draw_demo_rows_after_ship(f, scene);
+    // Dashboard band back to backdrop (clears last frame's gauges/digits and
+    // any ship spill), then the art blit — the pure path's exact order, so an
+    // exploding ship's low pixels end up under the cockpit frame identically.
+    restore_rows(f, u, VIEW_BOTTOM_Y, FRAMEBUFFER_HEIGHT);
+    draw_archive_frame(f, assets_.dashboard, 0, PAL_DASH_BASE);
+    draw_gauge(f, assets_.oxygen_gauge, tank_gauge_level(scene.snapshot.oxygen_percent));
+    draw_gauge(f, assets_.fuel_gauge, tank_gauge_level(scene.snapshot.fuel_percent));
+    draw_gauge(f, assets_.speed_gauge, speed_gauge_level(scene.snapshot.z_velocity));
+    draw_empty_tank_warning(f, scene);
+    draw_dashboard_number(f, skyroads::core::DOS_GRAVITY_READOUT_X,
+                          skyroads::core::DOS_GRAVITY_READOUT_Y,
+                          skyroads::core::dos_gravity_readout(
+                              static_cast<int32_t>(scene.gravity)),
+                          skyroads::core::DOS_GRAVITY_READOUT_DIGITS);
+    if (!scene.is_demo && scene.did_win) {
+        const std::string text =
+            scene.is_final_road ? std::string("The End") : std::string("Road Completed");
+        draw_rom_text(f, skyroads::core::dos_text_centered_x(text.size()), 80, text,
+                      static_cast<uint8_t>(PAL_DASH_BASE + 7));
+    }
+
+    // Ship rect for the next frame's restore: sprites are 24x30 cars blocks;
+    // generous margins cost a few KB and make the bound unarguable.
+    c.ship_x0 = ship_placement.sprite_left_x - 8;
+    c.ship_y0 = ship_placement.sprite_top_y - 8;
+    c.ship_x1 = ship_placement.sprite_left_x + 24 + 8;
+    c.ship_y1 = ship_placement.sprite_top_y + 30 + 8;
 }
 
 void ReferenceRenderer::render_play_scene_with_debug(RenderedFrame& out,

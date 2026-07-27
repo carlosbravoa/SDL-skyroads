@@ -79,6 +79,27 @@ struct RenderedFrame {
     Palette256 palette;
 };
 
+// RVSTACK: state for the incremental play-scene path (the console port).
+// render_play_scene rebuilds all 64000 pixels every frame — a pure function,
+// which is what the equivalence tests need, and also exactly what the DOS
+// game did NOT do on a 386: it drew backdrop + dashboard once per road and
+// per frame rewrote only the road viewport, the ship and the gauges. This
+// cache restores that structure: `underlay` holds clear+backdrop+dashboard
+// for the current road, and the incremental renderer copies back only the
+// bands the previous frame dirtied. Output is byte-identical to the pure
+// path (verified by the twin's SKY_VERIFY dual-render compare).
+struct PlaySceneCache {
+    FrameBuffer320x200 underlay;
+    Palette256 palette;
+    std::vector<RgbColor> road_palette;  // road-change detection
+    std::size_t world_index = static_cast<std::size_t>(-1);
+    bool valid = false;         // underlay/palette match the current road
+    bool frame_primed = false;  // the caller's persistent frame holds last frame
+    // Last frame's ship-sprite rect (the only draw that can leave the road
+    // band upward); spans/shadow are band-clipped, HUD is dashboard-band.
+    int32_t ship_x0 = 0, ship_y0 = 0, ship_x1 = 0, ship_y1 = 0;
+};
+
 // Resolves the index buffer through the palette into the 320x200x4 RGBA bytes
 // the RGBA-era renderer produced (alpha always 255). Used by the SDL host to
 // present and by frame_hash, so hashes stay comparable across the re-plumb.
@@ -171,6 +192,11 @@ public:
 
     const AttractModeAssets& assets() const { return assets_; }
     RenderedFrame render_scene(const RenderScene& scene) const;
+    // RVSTACK: byte-identical to render_play_scene, at the DOS write budget.
+    // `out.frame` must persist across calls (it carries the previous frame);
+    // reset cache.frame_primed after rendering anything else into it.
+    void render_play_scene_incremental(RenderedFrame& out, PlaySceneCache& cache,
+                                       const DemoPlaybackState& scene) const;
     RenderedFrame render_scene_with_debug(const RenderScene& scene,
                                           DebugViewMode debug_view) const;
 
@@ -183,6 +209,10 @@ private:
     void render_go_menu(RenderedFrame& out, const GoMenuScene& scene) const;
     void render_play_scene(RenderedFrame& out,
                            const DemoPlaybackState& scene) const;
+    // RVSTACK: shared between the pure and incremental play paths.
+    void assemble_play_palette(Palette256& pal,
+                               const DemoPlaybackState& scene) const;
+    const ImageArchive* play_world(const DemoPlaybackState& scene) const;
     void render_play_scene_with_debug(RenderedFrame& out,
                                       const DemoPlaybackState& scene,
                                       DebugViewMode debug_view) const;
