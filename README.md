@@ -38,8 +38,8 @@ creators, Bluemoon Interactive. Download the original game from them:
 
 - **http://www.bluemoon.ee/history/skyroads/**
 
-Unzip it and copy the data files into a `skyroads-assets/` directory next to
-this README:
+Unzip it and put the data files somewhere the game will look. Running from a
+checkout, a `skyroads-assets/` directory next to this README is the usual spot:
 
 ```
 skyroads-assets/
@@ -55,6 +55,26 @@ renderer kept inside the executable were reverse-engineered and baked into the
 code. The EXE is only used by the `summary` inspection command and one
 validation test. `skyroads-assets/` is git-ignored so the data stays local.
 
+### Where the game looks
+
+With no argument, the data directory is searched for in this order. A directory
+counts only if it contains `ROADS.LZS`, and filenames are matched
+case-insensitively (a DOS copy may have unpacked as `roads.lzs`).
+
+1. `$SKYROADS_ASSETS`
+2. `$SNAP_USER_COMMON/gamedata` (inside the snap)
+3. `~/Games/SkyRoads`, and the `games`/`skyroads` lowercase spellings
+4. `~/SkyRoads`, `~/skyroads`
+5. the working directory, then `./skyroads-assets`
+
+Or pass the folder directly: `skyroads-sdl /path/to/skyroads`. Run
+`skyroads-sdl --help` to print the list. If nothing is found the game says so
+and lists everywhere it looked.
+
+Progress and settings are saved to `skyroads.cfg`, in the game data directory
+normally, or in `$SNAP_USER_COMMON` inside the snap so the data directory need
+not be writable.
+
 ## Run
 
 ```sh
@@ -68,6 +88,23 @@ select/launch/continue · Tab debug views · Esc back · Q quit.
 
 Flow: intro → main menu → **Start** → pick a world/level → **Enter** to launch.
 Crash or finish returns you to the level-select screen.
+
+## Snap package
+
+```sh
+snapcraft
+sudo snap install ./skyroads-native_*.snap --dangerous
+```
+
+The snap bundles no game data. Copy your SkyRoads files into
+`~/snap/skyroads-native/common/gamedata` — that folder needs no extra
+permissions and is created on first run. A copy under `~/Games/SkyRoads` works
+too via the auto-connected `home` interface. For game data on removable media,
+connect that interface by hand:
+
+```sh
+sudo snap connect skyroads-native:removable-media
+```
 
 ## Test
 
