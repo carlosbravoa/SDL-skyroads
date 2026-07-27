@@ -26,4 +26,4 @@ mkdir -p "$SNAP_USER_COMMON/gamedata"
 # Writable state (skyroads.cfg) belongs here, not beside the game data.
 cd "$SNAP_USER_COMMON" || exit 1
 
-exec "$SNAP/bin/skyroads-sdl" "$@"
+exec "$SNAP/usr/bin/skyroads-sdl" "$@"

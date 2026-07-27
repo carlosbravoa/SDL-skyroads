@@ -17,3 +17,6 @@
 /screenshots/og1.png
 /screenshots/og2.png
 /screenshots/og-pipe.png
+
+# Built snap packages
+/*.snap

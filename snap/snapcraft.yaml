@@ -1,7 +1,13 @@
 name: skyroads-native
+title: SkyRoads Native
 base: core24
 adopt-info: skyroads
 summary: Faithful native port of the 1993 DOS game SkyRoads
+website: https://github.com/carlosbravoa/SDL-skyroads
+source-code: https://github.com/carlosbravoa/SDL-skyroads
+issues: https://github.com/carlosbravoa/SDL-skyroads/issues
+contact: https://github.com/carlosbravoa/SDL-skyroads/issues
+# license: add an SPDX identifier here once the project picks one.
 description: |
   A C++17/SDL2 reimplementation of SkyRoads, the 1993 DOS game by Bluemoon
   Interactive, rebuilt by reverse-engineering the original executable: the
@@ -64,7 +70,7 @@ parts:
       - libpulse0
     override-pull: |
       craftctl default
-      craftctl set version="$(git describe --tags --always 2>/dev/null || echo 1.0.0)"
+      craftctl set version="$(git describe --tags --always 2>/dev/null | sed 's/^v//' || echo 1.0.0)"
       # `source: .` copies the working directory as it is on disk, which would sweep
       # in the player's own game data and the reverse-engineering workspace even
       # though both are gitignored. Neither may be redistributed, so drop them here
@@ -74,11 +80,6 @@ parts:
              "$CRAFT_PART_SRC/re" \
              "$CRAFT_PART_SRC/screenshots" \
              "$CRAFT_PART_SRC/CLAUDE.md"
-    override-build: |
-      craftctl default
-      # The project has no install target: the host binary is the only artefact.
-      install -Dm755 "$CRAFT_PART_BUILD/skyroads-sdl" \
-        "$CRAFT_PART_INSTALL/bin/skyroads-sdl"
 
   launcher:
     plugin: dump

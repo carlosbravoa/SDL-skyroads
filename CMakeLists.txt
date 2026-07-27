@@ -93,6 +93,7 @@ set_tests_properties(data core renderer audio PROPERTIES
 # ---- CLI verifier ----------------------------------------------------------
 add_executable(skyroads-cli src/cli/main.cpp)
 target_link_libraries(skyroads-cli PRIVATE skyroads_core)
+install(TARGETS skyroads-cli RUNTIME DESTINATION bin)
 
 # ---- SDL host (optional: only built when SDL2 is available) -----------------
 find_package(SDL2 QUIET)
@@ -111,6 +112,7 @@ if(TARGET SDL2::SDL2 OR TARGET PkgConfig::SDL2)
   else()
     target_link_libraries(skyroads-sdl PRIVATE PkgConfig::SDL2)
   endif()
+  install(TARGETS skyroads-sdl RUNTIME DESTINATION bin)
   message(STATUS "SDL2 found: building skyroads-sdl host")
 else()
   message(STATUS "SDL2 not found: skipping skyroads-sdl host")
