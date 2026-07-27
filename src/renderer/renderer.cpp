@@ -185,7 +185,7 @@ struct PrimitiveCursor {
 
     bool skip(const TrekdatRecord& record) {
         if (!next_offset) return false;
-        next_offset = record.next_shape_offset(*next_offset);
+        next_offset = record.next_shape_offset_fast(*next_offset);
         return true;
     }
 
@@ -1035,12 +1035,14 @@ bool PrimitiveCursor::emit(FrameBuffer320x200& frame, const TrekdatRecord& recor
     (void)cell;
     if (!next_offset) return false;
     const uint16_t offset = *next_offset;
-    auto shape = record.shape_at_offset(offset);
+    // RVSTACK: decode-once lookup — this used to parse the raw shape stream
+    // (twice) for every shape of every frame; see TrekdatRecord::shape_ref.
+    const TrekdatShape* shape = record.shape_ref(offset);
     if (!shape) {
         next_offset = std::nullopt;
         return false;
     }
-    next_offset = record.next_shape_offset(offset);
+    next_offset = record.next_shape_offset_fast(offset);
     if (shape->span_count == 0) return true;
     const uint8_t shade = override_color_code ? *override_color_code : shape->color;
     const uint8_t palette_index = dos_shade_to_palette(shade, side);

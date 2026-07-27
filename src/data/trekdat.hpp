@@ -85,6 +85,16 @@ struct TrekdatRecord {
     TrekdatDosPointerLayout dos_pointer_layout() const;
     std::optional<TrekdatShape> shape_at_offset(uint16_t start_offset) const;
     std::optional<uint16_t> next_shape_offset(uint16_t start_offset) const;
+
+    // RVSTACK: decode-once accessors for the render path. The renderer's
+    // shape cursor re-parsed the raw stream for every shape of every frame
+    // (and parsed each shape a second time just to find the next offset) —
+    // at 74 MHz that parsing WAS most of the frame time. `shapes` covers the
+    // pointer-table offsets already; chained offsets memoize here. Kept
+    // separate so unique_pointer_count() (asserted by tests) is untouched.
+    const TrekdatShape* shape_ref(uint16_t start_offset) const;
+    std::optional<uint16_t> next_shape_offset_fast(uint16_t start_offset) const;
+    mutable std::map<uint16_t, TrekdatShape> shape_memo;
 };
 
 struct TrekdatArchive {

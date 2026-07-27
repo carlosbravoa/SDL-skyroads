@@ -236,6 +236,33 @@ std::optional<uint16_t> TrekdatRecord::next_shape_offset(
     return static_cast<uint16_t>(next_offset);
 }
 
+// RVSTACK: see the header note — decode each offset once, ever.
+const TrekdatShape* TrekdatRecord::shape_ref(uint16_t start_offset) const {
+    const auto hit = shapes.find(start_offset);
+    if (hit != shapes.end()) return &hit->second;
+    const auto memo = shape_memo.find(start_offset);
+    if (memo != shape_memo.end()) return &memo->second;
+    try {
+        const auto inserted =
+            shape_memo.emplace(start_offset, parse_trekdat_shape(expanded, start_offset));
+        return &inserted.first->second;
+    } catch (const Error&) {
+        return nullptr;
+    }
+}
+
+std::optional<uint16_t> TrekdatRecord::next_shape_offset_fast(
+    uint16_t start_offset) const {
+    const TrekdatShape* shape = shape_ref(start_offset);
+    if (!shape) return std::nullopt;
+    const std::size_t next_offset =
+        static_cast<std::size_t>(shape->start_offset) + shape->size;
+    if (next_offset + 3 > expanded.size()) {
+        return std::nullopt;
+    }
+    return static_cast<uint16_t>(next_offset);
+}
+
 TrekdatArchive load_trekdat_lzs_bytes(const Bytes& data) {
     if (data.size() < 7) {
         throw Error::invalid_format(
