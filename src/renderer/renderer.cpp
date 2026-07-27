@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <utility>
 
 #include "core/dos_font.hpp"
@@ -196,11 +197,92 @@ uint8_t nonzero_or(uint8_t value, uint8_t fallback) {
     return value == 0 ? fallback : value;
 }
 
-// Current road's VGA palette for the frame being drawn (set in
-// render_play_scene). The DOS road renderer colours each TREKDAT span by
-// indexing this palette with the shape's colour code, which yields the exact
-// road greys and wall pinks. Single-threaded renderer, so a file-local is safe.
-const std::vector<RgbColor>* g_road_palette = nullptr;
+// ---- gameplay DAC layout ---------------------------------------------------
+// The gameplay palette is a perfect 256-slot partition, recovered from the CMAP
+// sizes and the base the EXE loads DASHBRD.LZS at (0x5C, @0x5589): ROADS.LZS
+// ships 72 road colours per level, CARS.LZS 20, DASHBRD.LZS 50, and every
+// WORLDn.LZS backdrop 114 -- 72 + 20 + 50 + 114 = 256 exactly. The road band
+// starting at 0 means a road pixel's framebuffer byte IS its shade code, which
+// is what lets the ship-shadow blit remap indices in place (@0x3437).
+constexpr std::size_t PAL_ROAD_BASE = 0x00;  // 0x00..0x47 road palette
+constexpr std::size_t PAL_CARS_BASE = 0x48;  // 0x48..0x5B ship sprites
+constexpr std::size_t PAL_DASH_BASE = 0x5C;  // 0x5C..0x8D dashboard
+constexpr std::size_t PAL_WORLD_BASE = 0x8E; // 0x8E..0xFF world backdrop
+
+// ---- intro / menu DAC layout -----------------------------------------------
+// Each screen's art keeps its CMAP in its own band, so the intro's palette
+// animation on the title band can never touch backdrop or anim pixels.
+constexpr std::size_t PAL_INTRO_BACKDROP_BASE = 0x00; // intro.lzs pic 0 (38)
+constexpr std::size_t PAL_INTRO_ANIM_BASE = 0x26;     // anim.lzs shared CMAP (102)
+constexpr std::size_t PAL_INTRO_TITLE_BASE = 0x8C;    // intro.lzs pic 1 (80)
+constexpr std::size_t PAL_INTRO_CREDIT_BASE = 0xDC;   // current credit pic (<= 12)
+constexpr std::size_t PAL_MENU_ART_BASE = 0xDC;       // mainmenu.lzs cursor art (3)
+// setmenu.lzs pics 1..10 are 3-colour overlays; 3 slots each after the 34-colour
+// background band.
+constexpr std::size_t PAL_SETTINGS_OVERLAY_BASE = 0x22;
+constexpr std::size_t PAL_GOMENU_MARK_BASE = 0xD4; // gomenu pic 1 (10), after pic 0 (212)
+constexpr uint8_t PAL_GOMENU_CURSOR = 0xDE;        // our selection outline colour
+
+// ---- palette band assembly -------------------------------------------------
+
+std::size_t pal_band_capacity(std::size_t base, std::size_t want) {
+    return std::min(want, std::size_t{256} - base);
+}
+
+void pal_band_fill(Palette256& pal, std::size_t base,
+                   const std::vector<RgbColor>& colors) {
+    const std::size_t count = pal_band_capacity(base, colors.size());
+    for (std::size_t i = 0; i < count; ++i) pal.colors[base + i] = colors[i];
+}
+
+void pal_band_brightness(Palette256& pal, std::size_t base,
+                         const std::vector<RgbColor>& colors, float brightness) {
+    const std::size_t count = pal_band_capacity(base, colors.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        pal.colors[base + i] = scale_brightness(colors[i], brightness);
+    }
+}
+
+// The intro picture's palette animation, applied to its band exactly as the DOS
+// build reprograms the DAC over the fixed screen: `mix` slides from the frame's
+// first CMAP to its second (@0x43d8-@0x440f), `white` flashes the result out to
+// full intensity (@0x4938), and the whole band then rides the master brightness
+// fade. Same float ops, same order, as the RGBA-era per-pixel path.
+void pal_band_intro(Palette256& pal, std::size_t base, const ImageFrame& fragment,
+                    float mix, float white, float brightness) {
+    const float m = std::clamp(mix, 0.0f, 1.0f);
+    const float w = std::clamp(white, 0.0f, 1.0f);
+    const std::size_t count =
+        pal_band_capacity(base, fragment.palette.colors.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        RgbColor color = fragment.palette.colors[i];
+        if (i < fragment.palette_start.colors.size()) {
+            color = lerp_color(fragment.palette_start.colors[i], color, m);
+        }
+        color = lerp_color(color, RgbColor(252, 252, 252), w);
+        pal.colors[base + i] = scale_brightness(color, brightness);
+    }
+}
+
+// The debug views draw the world backdrop alpha-blended over the uniform clear
+// colour; with a constant underlay the blend is a pure per-entry transform.
+// Channel math matches the RGBA-era blend_pixel byte-for-byte.
+void pal_band_blend(Palette256& pal, std::size_t base,
+                    const std::vector<RgbColor>& colors, float brightness,
+                    float alpha, RgbColor under) {
+    alpha = std::clamp(alpha, 0.0f, 1.0f);
+    const std::size_t count = pal_band_capacity(base, colors.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        const RgbColor src = scale_brightness(colors[i], brightness);
+        auto ch = [&](uint8_t d, uint8_t s) -> uint8_t {
+            return static_cast<uint8_t>(std::round(
+                static_cast<float>(d) * (1.0f - alpha) +
+                static_cast<float>(s) * alpha));
+        };
+        pal.colors[base + i] =
+            RgbColor(ch(under.r, src.r), ch(under.g, src.g), ch(under.b, src.b));
+    }
+}
 
 // Both rasterizers translate the strip's shade byte through DS:0x0322 before it ever
 // reaches the palette, and they read different bytes of the entry: the forward pass
@@ -214,37 +296,24 @@ uint8_t dos_shade_to_palette(uint8_t shade, DosRenderSide side) {
                                        : skyroads::core::DOS_SHADE_LUT_REVERSE[shade];
 }
 
-RgbColor dos_shape_color(LevelCell cell, uint8_t color_code) {
-    if (g_road_palette != nullptr && color_code < g_road_palette->size()) {
-        return (*g_road_palette)[color_code];
-    }
-    // Fallback (no palette available): approximate from the tile's base colour.
-    const RgbColor base = road_color(cell);
-    if (color_code >= 0x01 && color_code <= 0x0E) {
-        return scale_brightness(base, 0.98f + static_cast<float>(color_code & 0x0F) * 0.02f);
-    }
-    if (color_code >= 0x0F && color_code <= 0x1D) return scale_brightness(base, 1.18f);
-    if (color_code >= 0x1E && color_code <= 0x2D) return scale_brightness(base, 0.78f);
-    return scale_brightness(base, 0.92f);
-}
-
 void draw_trekdat_span(FrameBuffer320x200& frame, int32_t x, int32_t y,
-                       int32_t width, RgbColor color, uint8_t shade) {
+                       int32_t width, uint8_t palette_index) {
     if (y < static_cast<int32_t>(HORIZON_Y) || y >= static_cast<int32_t>(VIEW_BOTTOM_Y)) {
         return;
     }
-    // Record the shade as well as the colour: the ship's shadow reads the road back
-    // out of the framebuffer and remaps whatever index it finds.
+    // The road band starts at slot 0, so the written byte doubles as the shade
+    // the ship's shadow reads back and remaps.
+    const uint8_t index = static_cast<uint8_t>(PAL_ROAD_BASE + palette_index);
     const int32_t x0 = std::max(x, 0);
     const int32_t x1 = std::min(x + width, static_cast<int32_t>(SCREEN_WIDTH));
     for (int32_t px = x0; px < x1; ++px) {
         frame.set_pixel(static_cast<std::size_t>(px), static_cast<std::size_t>(y),
-                        color, shade);
+                        index, palette_index);
     }
 }
 
 void draw_dos_shape(FrameBuffer320x200& frame, const TrekdatShape& shape,
-                    RgbColor color, DosRenderSide side, uint8_t shade) {
+                    DosRenderSide side, uint8_t palette_index) {
     for (const auto& span : shape.spans) {
         if (span.width == 0) continue;
         int32_t x;
@@ -255,7 +324,7 @@ void draw_dos_shape(FrameBuffer320x200& frame, const TrekdatShape& shape,
                 static_cast<int32_t>(span.width);
         }
         draw_trekdat_span(frame, x, static_cast<int32_t>(span.y),
-                          static_cast<int32_t>(span.width), color, shade);
+                          static_cast<int32_t>(span.width), palette_index);
     }
 }
 
@@ -310,6 +379,31 @@ int32_t dos_ship_vertical_state(const DemoPlaybackState& scene) {
 }
 
 } // namespace
+
+// Debug overlays and the no-TREKDAT fallback road paint with synthesized RGB
+// constants that have no home in the scene's DAC layout. They borrow palette
+// slots from a range the current view provably does not reference, assigned
+// first-come-first-served; if the range ever runs out the last slot is shared
+// (dev tooling only -- the game itself never allocates here). Referenced in the
+// header method signatures, so it lives in the namespace (not anonymous).
+struct ScratchColors {
+    Palette256& palette;
+    std::size_t last;
+    std::size_t next;
+    std::map<RgbColor, uint8_t> assigned;
+
+    ScratchColors(Palette256& pal, std::size_t first, std::size_t last_inclusive)
+        : palette(pal), last(last_inclusive), next(first) {}
+
+    uint8_t index_for(RgbColor color) {
+        const auto it = assigned.find(color);
+        if (it != assigned.end()) return it->second;
+        const std::size_t slot = next <= last ? next++ : last;
+        palette.colors[slot] = color;
+        assigned.emplace(color, static_cast<uint8_t>(slot));
+        return static_cast<uint8_t>(slot);
+    }
+};
 
 // ProjectedRoadSlice is referenced in the header method signatures, so it lives
 // in the namespace (not anonymous).
@@ -608,12 +702,12 @@ ShipScreenPlacement ship_screen_placement(const DemoPlaybackState& scene,
 }
 
 void stroke_rect(FrameBuffer320x200& frame, int32_t x, int32_t y, int32_t w,
-                 int32_t h, RgbColor color) {
+                 int32_t h, uint8_t index) {
     if (w <= 0 || h <= 0) return;
-    frame.fill_rect(x, y, w, 1, color);
-    frame.fill_rect(x, y + h - 1, w, 1, color);
-    frame.fill_rect(x, y, 1, h, color);
-    frame.fill_rect(x + w - 1, y, 1, h, color);
+    frame.fill_rect(x, y, w, 1, index);
+    frame.fill_rect(x, y + h - 1, w, 1, index);
+    frame.fill_rect(x, y, 1, h, index);
+    frame.fill_rect(x + w - 1, y, 1, h, index);
 }
 
 RgbColor debug_cell_color(LevelCell cell) {
@@ -927,12 +1021,13 @@ ImageFrame transpose_sprite(const ImageFrame& sprite) {
 
 } // namespace
 
-// ---- PrimitiveCursor::emit (needs draw_dos_shape/dos_shape_color) ----------
+// ---- PrimitiveCursor::emit (needs draw_dos_shape) --------------------------
 
 namespace {
 bool PrimitiveCursor::emit(FrameBuffer320x200& frame, const TrekdatRecord& record,
                            LevelCell cell, DosRenderSide side,
                            std::optional<uint8_t> override_color_code) {
+    (void)cell;
     if (!next_offset) return false;
     const uint16_t offset = *next_offset;
     auto shape = record.shape_at_offset(offset);
@@ -944,8 +1039,7 @@ bool PrimitiveCursor::emit(FrameBuffer320x200& frame, const TrekdatRecord& recor
     if (shape->span_count == 0) return true;
     const uint8_t shade = override_color_code ? *override_color_code : shape->color;
     const uint8_t palette_index = dos_shade_to_palette(shade, side);
-    const RgbColor color = dos_shape_color(cell, palette_index);
-    draw_dos_shape(frame, *shape, color, side, palette_index);
+    draw_dos_shape(frame, *shape, side, palette_index);
     return true;
 }
 } // namespace
@@ -955,21 +1049,16 @@ bool PrimitiveCursor::emit(FrameBuffer320x200& frame, const TrekdatRecord& recor
 FrameBuffer320x200::FrameBuffer320x200()
     : width(SCREEN_WIDTH),
       height(SCREEN_HEIGHT),
-      pixels_rgba(FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT * 4, 0),
+      pixels(FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT, 0),
       shade_plane(FRAMEBUFFER_WIDTH * FRAMEBUFFER_HEIGHT, 0) {}
 
-void FrameBuffer320x200::clear(RgbColor color) {
-    for (std::size_t i = 0; i < pixels_rgba.size(); i += 4) {
-        pixels_rgba[i] = color.r;
-        pixels_rgba[i + 1] = color.g;
-        pixels_rgba[i + 2] = color.b;
-        pixels_rgba[i + 3] = 255;
-    }
+void FrameBuffer320x200::clear(uint8_t index) {
+    std::fill(pixels.begin(), pixels.end(), index);
     std::fill(shade_plane.begin(), shade_plane.end(), uint8_t{0});
 }
 
 void FrameBuffer320x200::fill_rect(int32_t x, int32_t y, int32_t w, int32_t h,
-                                   RgbColor color) {
+                                   uint8_t index) {
     const std::size_t x0 = static_cast<std::size_t>(std::max(x, 0));
     const std::size_t y0 = static_cast<std::size_t>(std::max(y, 0));
     const std::size_t x1 = static_cast<std::size_t>(
@@ -978,25 +1067,26 @@ void FrameBuffer320x200::fill_rect(int32_t x, int32_t y, int32_t w, int32_t h,
         std::max(std::min(y + h, static_cast<int32_t>(FRAMEBUFFER_HEIGHT)), 0));
     for (std::size_t yy = y0; yy < y1; ++yy) {
         for (std::size_t xx = x0; xx < x1; ++xx) {
-            set_pixel(xx, yy, color);
+            set_pixel(xx, yy, index);
         }
     }
 }
 
-void FrameBuffer320x200::set_pixel(std::size_t x, std::size_t y, RgbColor color) {
+void FrameBuffer320x200::set_pixel(std::size_t x, std::size_t y, uint8_t index) {
     if (x >= FRAMEBUFFER_WIDTH || y >= FRAMEBUFFER_HEIGHT) return;
-    const std::size_t offset = (y * FRAMEBUFFER_WIDTH + x) * 4;
-    pixels_rgba[offset] = color.r;
-    pixels_rgba[offset + 1] = color.g;
-    pixels_rgba[offset + 2] = color.b;
-    pixels_rgba[offset + 3] = 255;
+    pixels[y * FRAMEBUFFER_WIDTH + x] = index;
 }
 
-void FrameBuffer320x200::set_pixel(std::size_t x, std::size_t y, RgbColor color,
+void FrameBuffer320x200::set_pixel(std::size_t x, std::size_t y, uint8_t index,
                                    uint8_t shade) {
     if (x >= FRAMEBUFFER_WIDTH || y >= FRAMEBUFFER_HEIGHT) return;
-    set_pixel(x, y, color);
+    set_pixel(x, y, index);
     shade_plane[y * FRAMEBUFFER_WIDTH + x] = shade;
+}
+
+uint8_t FrameBuffer320x200::pixel_at(std::size_t x, std::size_t y) const {
+    if (x >= FRAMEBUFFER_WIDTH || y >= FRAMEBUFFER_HEIGHT) return 0;
+    return pixels[y * FRAMEBUFFER_WIDTH + x];
 }
 
 uint8_t FrameBuffer320x200::shade_at(std::size_t x, std::size_t y) const {
@@ -1004,21 +1094,16 @@ uint8_t FrameBuffer320x200::shade_at(std::size_t x, std::size_t y) const {
     return shade_plane[y * FRAMEBUFFER_WIDTH + x];
 }
 
-void FrameBuffer320x200::blend_pixel(std::size_t x, std::size_t y, RgbColor color,
-                                     float alpha) {
-    if (x >= FRAMEBUFFER_WIDTH || y >= FRAMEBUFFER_HEIGHT) return;
-    alpha = std::clamp(alpha, 0.0f, 1.0f);
-    const std::size_t offset = (y * FRAMEBUFFER_WIDTH + x) * 4;
-    const float dr = pixels_rgba[offset];
-    const float dg = pixels_rgba[offset + 1];
-    const float db = pixels_rgba[offset + 2];
-    pixels_rgba[offset] = static_cast<uint8_t>(
-        std::round(dr * (1.0f - alpha) + static_cast<float>(color.r) * alpha));
-    pixels_rgba[offset + 1] = static_cast<uint8_t>(
-        std::round(dg * (1.0f - alpha) + static_cast<float>(color.g) * alpha));
-    pixels_rgba[offset + 2] = static_cast<uint8_t>(
-        std::round(db * (1.0f - alpha) + static_cast<float>(color.b) * alpha));
-    pixels_rgba[offset + 3] = 255;
+Bytes expand_rgba(const FrameBuffer320x200& frame, const Palette256& palette) {
+    Bytes rgba(frame.pixels.size() * 4);
+    for (std::size_t i = 0; i < frame.pixels.size(); ++i) {
+        const RgbColor color = palette.colors[frame.pixels[i]];
+        rgba[i * 4] = color.r;
+        rgba[i * 4 + 1] = color.g;
+        rgba[i * 4 + 2] = color.b;
+        rgba[i * 4 + 3] = 255;
+    }
+    return rgba;
 }
 
 // ---- assets / atlas --------------------------------------------------------
@@ -1141,36 +1226,55 @@ const char* debug_label(DebugViewMode mode) {
 ReferenceRenderer::ReferenceRenderer(AttractModeAssets assets)
     : assets_(std::move(assets)), car_atlas_(CarAtlas::from_archive(assets_.cars)) {}
 
-FrameBuffer320x200 ReferenceRenderer::render_scene(const RenderScene& scene) const {
+RenderedFrame ReferenceRenderer::render_scene(const RenderScene& scene) const {
     return render_scene_with_debug(scene, DebugViewMode::Off);
 }
 
-FrameBuffer320x200 ReferenceRenderer::render_scene_with_debug(
+RenderedFrame ReferenceRenderer::render_scene_with_debug(
     const RenderScene& scene, DebugViewMode debug_view) const {
-    FrameBuffer320x200 frame;
+    RenderedFrame out;
     switch (scene.tag) {
-        case RenderScene::Tag::Intro: render_intro(frame, scene.intro); break;
-        case RenderScene::Tag::MainMenu: render_main_menu(frame, scene.main_menu); break;
-        case RenderScene::Tag::HelpMenu: render_help_menu(frame, scene.help_menu); break;
+        case RenderScene::Tag::Intro: render_intro(out, scene.intro); break;
+        case RenderScene::Tag::MainMenu: render_main_menu(out, scene.main_menu); break;
+        case RenderScene::Tag::HelpMenu: render_help_menu(out, scene.help_menu); break;
         case RenderScene::Tag::SettingsMenu:
-            render_settings_menu(frame, scene.settings_menu);
+            render_settings_menu(out, scene.settings_menu);
             break;
         case RenderScene::Tag::GoMenu:
-            render_go_menu(frame, scene.go_menu);
+            render_go_menu(out, scene.go_menu);
             break;
         case RenderScene::Tag::DemoPlayback:
         case RenderScene::Tag::Gameplay:
-            render_play_scene_with_debug(frame, scene.play, debug_view);
+            render_play_scene_with_debug(out, scene.play, debug_view);
             break;
     }
-    return frame;
+    return out;
 }
 
-void ReferenceRenderer::render_intro(FrameBuffer320x200& frame,
+void ReferenceRenderer::render_intro(RenderedFrame& out,
                                      const IntroSequenceState& scene) const {
-    frame.clear(RgbColor(0, 0, 0));
+    FrameBuffer320x200& frame = out.frame;
+    Palette256& pal = out.palette;
+    // The master fade rides on every band -- it is the whole-DAC brightness fade
+    // the intro runs at @0x43d8.
+    if (!assets_.intro.frames.empty() && !assets_.intro.frames[0].empty()) {
+        pal_band_brightness(pal, PAL_INTRO_BACKDROP_BASE,
+                            assets_.intro.frames[0].front().palette.colors,
+                            scene.background_brightness);
+    }
+    for (const auto& group : assets_.anim.frames) {
+        if (group.empty()) continue;
+        pal_band_brightness(pal, PAL_INTRO_ANIM_BASE,
+                            group.front().palette.colors,
+                            scene.background_brightness);
+        break;
+    }
+    // Slot 0 is the clear colour; the art never blits its local index 0
+    // (transparent), so the backdrop band cannot claim it.
+    pal.colors[0] = RgbColor(0, 0, 0);
+    frame.clear(0);
     // intro.lzs picture 0 is the backdrop the whole sequence is painted onto.
-    draw_archive_frame(frame, assets_.intro, 0, 1.0f, scene.background_brightness);
+    draw_archive_frame(frame, assets_.intro, 0, PAL_INTRO_BACKDROP_BASE);
 
     // The animation is cumulative: the EXE blits each group's fragments straight to
     // the screen and never repaints the backdrop, so replay every group up to the
@@ -1181,73 +1285,135 @@ void ReferenceRenderer::render_intro(FrameBuffer320x200& frame,
         if (group.empty()) continue;
         if (groups_drawn >= scene.anim_groups_drawn) break;
         for (const auto& fragment : group) {
-            draw_fragment(frame, fragment, 1.0f, scene.background_brightness, 1.0f);
+            draw_fragment(frame, fragment, PAL_INTRO_ANIM_BASE, 1.0f);
         }
         groups_drawn += 1;
     }
 
-    if (scene.title_visible && INTRO_TITLE_FRAME < assets_.intro.frames.size()) {
-        for (const auto& fragment : assets_.intro.frames[INTRO_TITLE_FRAME]) {
-            draw_intro_picture(frame, fragment, scene.title_mix, scene.title_white,
-                               scene.background_brightness, scene.title_wipe);
+    if (scene.title_visible && INTRO_TITLE_FRAME < assets_.intro.frames.size() &&
+        !assets_.intro.frames[INTRO_TITLE_FRAME].empty()) {
+        const auto& fragments = assets_.intro.frames[INTRO_TITLE_FRAME];
+        pal_band_intro(pal, PAL_INTRO_TITLE_BASE, fragments.front(),
+                       scene.title_mix, scene.title_white,
+                       scene.background_brightness);
+        for (const auto& fragment : fragments) {
+            draw_intro_picture(frame, fragment, PAL_INTRO_TITLE_BASE,
+                               scene.title_wipe);
         }
     }
 
     if (scene.credit_frame_index &&
-        *scene.credit_frame_index < assets_.intro.frames.size()) {
-        for (const auto& fragment : assets_.intro.frames[*scene.credit_frame_index]) {
-            draw_intro_picture(frame, fragment, scene.credit_mix, 0.0f,
-                               scene.background_brightness, 0.0f);
+        *scene.credit_frame_index < assets_.intro.frames.size() &&
+        !assets_.intro.frames[*scene.credit_frame_index].empty()) {
+        const auto& fragments = assets_.intro.frames[*scene.credit_frame_index];
+        pal_band_intro(pal, PAL_INTRO_CREDIT_BASE, fragments.front(),
+                       scene.credit_mix, 0.0f, scene.background_brightness);
+        for (const auto& fragment : fragments) {
+            draw_intro_picture(frame, fragment, PAL_INTRO_CREDIT_BASE, 0.0f);
         }
     }
 }
 
-void ReferenceRenderer::render_main_menu(FrameBuffer320x200& frame,
+void ReferenceRenderer::render_main_menu(RenderedFrame& out,
                                          const MainMenuScene& scene) const {
-    frame.clear(RgbColor(0, 0, 0));
-    draw_archive_frame(frame, assets_.intro, 0, 1.0f, 1.0f);
-    draw_archive_frame(frame, assets_.intro, 1, 1.0f, 1.0f);
+    FrameBuffer320x200& frame = out.frame;
+    Palette256& pal = out.palette;
+    if (!assets_.intro.frames.empty() && !assets_.intro.frames[0].empty()) {
+        pal_band_fill(pal, PAL_INTRO_BACKDROP_BASE,
+                      assets_.intro.frames[0].front().palette.colors);
+    }
+    if (assets_.intro.frames.size() > 1 && !assets_.intro.frames[1].empty()) {
+        pal_band_fill(pal, PAL_INTRO_TITLE_BASE,
+                      assets_.intro.frames[1].front().palette.colors);
+    }
+    if (!assets_.main_menu.frames.empty() && !assets_.main_menu.frames[0].empty()) {
+        pal_band_fill(pal, PAL_MENU_ART_BASE,
+                      assets_.main_menu.frames[0].front().palette.colors);
+    }
+    pal.colors[0] = RgbColor(0, 0, 0);
+    frame.clear(0);
+    draw_archive_frame(frame, assets_.intro, 0, PAL_INTRO_BACKDROP_BASE);
+    draw_archive_frame(frame, assets_.intro, 1, PAL_INTRO_TITLE_BASE);
     draw_archive_frame(frame, assets_.main_menu,
-                       skyroads::core::menu_cursor_index(scene.selected), 1.0f, 1.0f);
+                       skyroads::core::menu_cursor_index(scene.selected),
+                       PAL_MENU_ART_BASE);
 }
 
-void ReferenceRenderer::render_help_menu(FrameBuffer320x200& frame,
+void ReferenceRenderer::render_help_menu(RenderedFrame& out,
                                          const HelpMenuScene& scene) const {
-    frame.clear(RgbColor(0, 0, 0));
+    FrameBuffer320x200& frame = out.frame;
     const std::size_t page_index =
         std::min(scene.page_index, sat_sub(assets_.help_menu.frames.size(), 1));
-    draw_archive_frame(frame, assets_.help_menu, page_index, 1.0f, 1.0f);
+    // Full-screen pages, each with its own CMAP, shown one at a time at base 0.
+    if (page_index < assets_.help_menu.frames.size() &&
+        !assets_.help_menu.frames[page_index].empty()) {
+        pal_band_fill(out.palette, 0,
+                      assets_.help_menu.frames[page_index].front().palette.colors);
+    }
+    out.palette.colors[0] = RgbColor(0, 0, 0);
+    frame.clear(0);
+    draw_archive_frame(frame, assets_.help_menu, page_index, 0);
 }
 
-void ReferenceRenderer::render_settings_menu(FrameBuffer320x200& frame,
+namespace {
+// setmenu.lzs pics 1..10 are 3-colour overlays with per-picture CMAPs; give each
+// a fixed 3-slot band after the background's.
+std::size_t settings_overlay_base(std::size_t frame_index) {
+    return PAL_SETTINGS_OVERLAY_BASE + (frame_index - 1) * 3;
+}
+} // namespace
+
+void ReferenceRenderer::render_settings_menu(RenderedFrame& out,
                                              const SettingsMenuScene& scene) const {
-    frame.clear(RgbColor(0, 0, 0));
+    FrameBuffer320x200& frame = out.frame;
+    Palette256& pal = out.palette;
+    for (std::size_t f = 0; f < assets_.settings_menu.frames.size() && f < 11; ++f) {
+        if (assets_.settings_menu.frames[f].empty()) continue;
+        const std::size_t base = f == 0 ? 0 : settings_overlay_base(f);
+        pal_band_fill(pal, base,
+                      assets_.settings_menu.frames[f].front().palette.colors);
+    }
+    pal.colors[0] = RgbColor(0, 0, 0);
+    frame.clear(0);
     // setmenu.lzs: picture 0 is the background, 1..5 are the cursor outlines for the
     // five positions and 6..10 the "this option is active" fills. @0x4ae2 walks all
     // five positions and draws the fill only where the position matches the current
     // setting; @0x4c9a draws the outline for wherever the cursor is.
-    draw_archive_frame(frame, assets_.settings_menu, 0, 1.0f, 1.0f);
+    draw_archive_frame(frame, assets_.settings_menu, 0, 0);
     for (std::size_t position = 0; position < SETTINGS_POSITIONS; ++position) {
         const bool active = position <= 2 ? position == scene.input_device
                                           : position - 3 == scene.sound_option;
         if (!active) continue;
-        draw_archive_frame(frame, assets_.settings_menu,
-                           SETTINGS_MARKER_FIRST_FRAME + position, 1.0f, 1.0f);
+        const std::size_t marker = SETTINGS_MARKER_FIRST_FRAME + position;
+        draw_archive_frame(frame, assets_.settings_menu, marker,
+                           settings_overlay_base(marker));
     }
     const std::size_t cursor = std::min(scene.cursor, SETTINGS_POSITIONS - 1);
-    draw_archive_frame(frame, assets_.settings_menu,
-                       SETTINGS_CURSOR_FIRST_FRAME + cursor, 1.0f, 1.0f);
+    const std::size_t cursor_frame = SETTINGS_CURSOR_FIRST_FRAME + cursor;
+    draw_archive_frame(frame, assets_.settings_menu, cursor_frame,
+                       settings_overlay_base(cursor_frame));
 }
 
-void ReferenceRenderer::render_go_menu(FrameBuffer320x200& frame,
+void ReferenceRenderer::render_go_menu(RenderedFrame& out,
                                        const GoMenuScene& scene) const {
+    FrameBuffer320x200& frame = out.frame;
+    Palette256& pal = out.palette;
+    if (!assets_.go_menu.frames.empty() && !assets_.go_menu.frames[0].empty()) {
+        pal_band_fill(pal, 0, assets_.go_menu.frames[0].front().palette.colors);
+    }
+    if (assets_.go_menu.frames.size() > 1 && !assets_.go_menu.frames[1].empty()) {
+        pal_band_fill(pal, PAL_GOMENU_MARK_BASE,
+                      assets_.go_menu.frames[1].front().palette.colors);
+    }
+    pal.colors[PAL_GOMENU_CURSOR] = RgbColor(232, 232, 245);
+    pal.colors[0] = RgbColor(0, 0, 0);
     // Frame 0 of GOMENU is the full stage-selector grid (10 worlds x 3 roads,
     // names and planet thumbnails baked in). We just overlay a cursor on the
     // selected entry. Grid geometry measured from the art: two columns
     // (worlds 0-4 left, 5-9 right), rows step 39px, roads step 9px, first road
     // text at y=13; road text spans x59-92 (left) / x219-252 (right).
-    frame.clear(RgbColor(0, 0, 0));
-    draw_archive_frame(frame, assets_.go_menu, 0, 1.0f, 1.0f);
+    frame.clear(0);
+    draw_archive_frame(frame, assets_.go_menu, 0, 0);
 
     // Each road shows a row of small markers counting how many times it has been
     // completed (EXE @0x51ce-0x525a): GOMENU frame 1 is the 6x5 marker sprite, drawn
@@ -1264,7 +1430,8 @@ void ReferenceRenderer::render_go_menu(FrameBuffer320x200& frame,
         }
         const ImageFrame& mark = assets_.go_menu.frames[1].front();
         for (int i = 0; i < count; ++i) {
-            draw_sprite(frame, mark, mark_x + i * 7, mark_y, 1);
+            draw_sprite(frame, mark, mark_x + i * 7, mark_y, 1,
+                        PAL_GOMENU_MARK_BASE);
         }
     }
 
@@ -1277,28 +1444,49 @@ void ReferenceRenderer::render_go_menu(FrameBuffer320x200& frame,
     const int cursor_y = 12 + row * 39 + road * 9;
 
     // The original highlights the selected road by redrawing its text; we outline it.
-    stroke_rect(frame, cursor_x - 3, cursor_y - 1, 37, 9, RgbColor(232, 232, 245));
+    stroke_rect(frame, cursor_x - 3, cursor_y - 1, 37, 9, PAL_GOMENU_CURSOR);
 }
 
-void ReferenceRenderer::render_play_scene(FrameBuffer320x200& frame,
+void ReferenceRenderer::render_play_scene(RenderedFrame& out,
                                           const DemoPlaybackState& scene) const {
+    FrameBuffer320x200& frame = out.frame;
+    Palette256& pal = out.palette;
     const DerivedShipVisualState ship_visual = derive_ship_visual_state(scene);
     const ShipScreenPlacement ship_placement = ship_screen_placement(scene, ship_visual);
-    g_road_palette =
-        scene.road_palette.empty() ? nullptr : &scene.road_palette;
-    frame.clear(RgbColor(0, 0, 0));
+    // Assemble the gameplay DAC. Every shipped road palette has a black entry 0,
+    // which doubles as the clear/sky colour behind the backdrop's holes.
+    pal_band_fill(pal, PAL_ROAD_BASE, scene.road_palette);
+    if (!assets_.cars.frames.empty() && !assets_.cars.frames[0].empty()) {
+        pal_band_fill(pal, PAL_CARS_BASE,
+                      assets_.cars.frames[0].front().palette.colors);
+    }
+    if (!assets_.dashboard.frames.empty() && !assets_.dashboard.frames[0].empty()) {
+        pal_band_fill(pal, PAL_DASH_BASE,
+                      assets_.dashboard.frames[0].front().palette.colors);
+    } else {
+        // No dashboard art: keep at least the HUD's two purple shades usable.
+        for (std::size_t i = 0; i < dashboard_colors().size(); ++i) {
+            pal.colors[PAL_DASH_BASE + i] = dashboard_colors()[i];
+        }
+    }
     const ImageArchive* world = nullptr;
     if (scene.world_index < assets_.worlds.size()) world = &assets_.worlds[scene.world_index];
     else if (!assets_.worlds.empty()) world = &assets_.worlds.front();
-    if (world) draw_archive_frame(frame, *world, 0, 1.0f, 1.0f);
+    if (world && !world->frames.empty() && !world->frames[0].empty()) {
+        pal_band_fill(pal, PAL_WORLD_BASE,
+                      world->frames[0].front().palette.colors);
+    }
+
+    frame.clear(0);
+    if (world) draw_archive_frame(frame, *world, 0, PAL_WORLD_BASE);
 
     const bool drew_dos_road = draw_demo_rows_before_ship(frame, scene);
-    if (!drew_dos_road) draw_demo_rows_fallback(frame, scene);
+    if (!drew_dos_road) draw_demo_rows_fallback(out, scene);
     // The shadow is blitted straight AFTER the ship (@0x329d), not before it.
     draw_ship_sprite(frame, scene.frame_index, ship_visual, ship_placement);
     draw_ship_shadow(frame, ship_visual, ship_placement);
     if (drew_dos_road) draw_demo_rows_after_ship(frame, scene);
-    draw_archive_frame(frame, assets_.dashboard, 0, 1.0f, 1.0f);
+    draw_archive_frame(frame, assets_.dashboard, 0, PAL_DASH_BASE);
     draw_gauge(frame, assets_.oxygen_gauge, tank_gauge_level(scene.snapshot.oxygen_percent));
     draw_gauge(frame, assets_.fuel_gauge, tank_gauge_level(scene.snapshot.fuel_percent));
     draw_gauge(frame, assets_.speed_gauge, speed_gauge_level(scene.snapshot.z_velocity));
@@ -1319,26 +1507,26 @@ void ReferenceRenderer::render_play_scene(FrameBuffer320x200& frame,
         const std::string text =
             scene.is_final_road ? std::string("The End") : std::string("Road Completed");
         draw_rom_text(frame, skyroads::core::dos_text_centered_x(text.size()), 80, text,
-                      dashboard_palette_color(7));
+                      static_cast<uint8_t>(PAL_DASH_BASE + 7));
     }
 }
 
-void ReferenceRenderer::render_play_scene_with_debug(FrameBuffer320x200& frame,
+void ReferenceRenderer::render_play_scene_with_debug(RenderedFrame& out,
                                                      const DemoPlaybackState& scene,
                                                      DebugViewMode debug_view) const {
     switch (debug_view) {
         case DebugViewMode::Off:
-            render_play_scene(frame, scene);
+            render_play_scene(out, scene);
             break;
         case DebugViewMode::Overlay:
-            render_play_scene(frame, scene);
-            draw_debug_overlay(frame, scene);
+            render_play_scene(out, scene);
+            draw_debug_overlay(out, scene);
             break;
         case DebugViewMode::Geometry:
-            render_play_geometry_debug(frame, scene);
+            render_play_geometry_debug(out, scene);
             break;
         case DebugViewMode::TopDown:
-            render_play_topdown_debug(frame, scene);
+            render_play_topdown_debug(out, scene);
             break;
     }
 }
@@ -1359,10 +1547,14 @@ void ReferenceRenderer::draw_demo_rows_after_ship(FrameBuffer320x200& frame,
                           DosRoadPhase::AfterShip);
 }
 
-void ReferenceRenderer::draw_demo_rows_fallback(FrameBuffer320x200& frame,
+void ReferenceRenderer::draw_demo_rows_fallback(RenderedFrame& out,
                                                 const DemoPlaybackState& scene) const {
+    // No TREKDAT record to dispatch: the interim projected road paints with
+    // synthesized colours. The DOS span pass did not run, so the road band's
+    // slots (except 0, the sky) are free to hold them.
+    ScratchColors scratch(out.palette, 0x01, 0x47);
     for (const auto& slice : project_road_slices(scene)) {
-        draw_projected_slice(frame, slice);
+        draw_projected_slice(out.frame, slice, scratch);
     }
 }
 
@@ -1385,7 +1577,7 @@ void ReferenceRenderer::draw_ship_sprite(FrameBuffer320x200& frame,
         visual.sprite_kind == ShipSpriteKind::Exploding ? -2 : 0;
     const int32_t y = placement.sprite_center_y + explode_offset -
                       (static_cast<int32_t>(draw_height) / 2);
-    draw_sprite(frame, sprite, x, y, SHIP_SCALE);
+    draw_sprite(frame, sprite, x, y, SHIP_SCALE, PAL_CARS_BASE);
 }
 
 // The gauges are SEGMENTED BARS, not one picture that changes shape: each *_DISP.DAT
@@ -1402,14 +1594,9 @@ void ReferenceRenderer::draw_gauge(FrameBuffer320x200& frame,
                                    const HudFragmentPack& pack,
                                    std::size_t level) const {
     if (pack.fragments.empty()) return;
-    const std::vector<RgbColor>* palette = nullptr;
-    if (!assets_.dashboard.frames.empty() && !assets_.dashboard.frames[0].empty()) {
-        palette = &assets_.dashboard.frames[0].front().palette.colors;
-    }
-    auto pair_color = [&](bool lit, uint8_t mask_value) -> RgbColor {
-        const std::size_t index = (lit ? 2u : 0u) + (mask_value == 1 ? 0u : 1u);
-        if (palette != nullptr && index < palette->size()) return (*palette)[index];
-        return dashboard_colors()[std::min<std::size_t>(index, std::size_t{2})];
+    auto pair_index = [](bool lit, uint8_t mask_value) -> uint8_t {
+        return static_cast<uint8_t>(PAL_DASH_BASE + (lit ? 2u : 0u) +
+                                    (mask_value == 1 ? 0u : 1u));
     };
 
     for (std::size_t segment = 0; segment < pack.fragments.size(); ++segment) {
@@ -1421,7 +1608,7 @@ void ReferenceRenderer::draw_gauge(FrameBuffer320x200& frame,
                 if (mask_value == 0) continue;
                 frame.set_pixel(static_cast<std::size_t>(fragment.x) + x,
                                 static_cast<std::size_t>(fragment.y) + y,
-                                pair_color(lit, mask_value));
+                                pair_index(lit, mask_value));
             }
         }
     }
@@ -1434,16 +1621,11 @@ void ReferenceRenderer::draw_dashboard_number(FrameBuffer320x200& frame, int32_t
                                               int32_t y, int32_t value,
                                               std::size_t digits) const {
     if (value < 0) return;
-    const std::vector<RgbColor>* palette = nullptr;
-    if (!assets_.dashboard.frames.empty() && !assets_.dashboard.frames[0].empty()) {
-        palette = &assets_.dashboard.frames[0].front().palette.colors;
-    }
     // Glyph byte 0 is the digit stroke (palette index 0), 1 and 2 the two tan shades
     // of the readout window (dashbrd CMAP entries 5 and 6).
-    auto glyph_color = [&](uint8_t v) -> RgbColor {
+    auto glyph_color = [](uint8_t v) -> uint8_t {
         const std::size_t index = v == 0 ? 0u : (v == 1 ? 5u : 6u);
-        if (palette != nullptr && index < palette->size()) return (*palette)[index];
-        return RgbColor(0, 0, 0);
+        return static_cast<uint8_t>(PAL_DASH_BASE + index);
     };
 
     int32_t remaining = value;
@@ -1473,7 +1655,8 @@ void ReferenceRenderer::draw_dashboard_number(FrameBuffer320x200& frame, int32_t
 // The BIOS 8x8 ROM font printer (@0x450a): one glyph per character, x advancing by
 // exactly 8, and glyph bit 0x80 >> column. Background pixels are left alone.
 void ReferenceRenderer::draw_rom_text(FrameBuffer320x200& frame, int32_t x, int32_t y,
-                                      const std::string& text, RgbColor color) const {
+                                      const std::string& text,
+                                      uint8_t color_index) const {
     int32_t pen = x;
     for (char ch : text) {
         const auto& glyph = skyroads::core::dos_font_glyph(ch);
@@ -1485,27 +1668,19 @@ void ReferenceRenderer::draw_rom_text(FrameBuffer320x200& frame, int32_t x, int3
                 const int32_t py = y + static_cast<int32_t>(row);
                 if (px < 0 || py < 0) continue;
                 frame.set_pixel(static_cast<std::size_t>(px),
-                                static_cast<std::size_t>(py), color);
+                                static_cast<std::size_t>(py), color_index);
             }
         }
         pen += skyroads::core::DOS_FONT_ADVANCE;
     }
 }
 
-// dashbrd.lzs loads at palette base 0x5C, so global index 0x5C + n is simply the
-// n-th colour of its own CMAP.
-RgbColor ReferenceRenderer::dashboard_palette_color(std::size_t index) const {
-    if (!assets_.dashboard.frames.empty() && !assets_.dashboard.frames[0].empty()) {
-        const auto& colors = assets_.dashboard.frames[0].front().palette.colors;
-        if (index < colors.size()) return colors[index];
-    }
-    return RgbColor(255, 255, 255);
-}
-
 // The flashing label over an empty tank. The original swaps two palette entries in
 // place on each edge of the 4 Hz blink phase, and never repaints the dashboard, so the
 // label sits swapped for the whole high phase. This renderer redraws the dashboard
-// every frame, so the equivalent is to apply the swap while the phase is high.
+// every frame, so the equivalent is to swap the two indices across the label's
+// rectangle while the phase is high -- the same in-place index exchange the DOS
+// build achieves by reprogramming the two DAC entries.
 void ReferenceRenderer::draw_empty_tank_warning(FrameBuffer320x200& frame,
                                                 const DemoPlaybackState& scene) const {
     if (!skyroads::core::dos_warn_blink_phase(scene.frame_index)) return;
@@ -1523,18 +1698,16 @@ void ReferenceRenderer::draw_empty_tank_warning(FrameBuffer320x200& frame,
     } else {
         return;
     }
-    const RgbColor a = dashboard_palette_color(skyroads::core::DOS_WARN_PALETTE_A);
-    const RgbColor b = dashboard_palette_color(skyroads::core::DOS_WARN_PALETTE_B);
+    const uint8_t a =
+        static_cast<uint8_t>(PAL_DASH_BASE + skyroads::core::DOS_WARN_PALETTE_A);
+    const uint8_t b =
+        static_cast<uint8_t>(PAL_DASH_BASE + skyroads::core::DOS_WARN_PALETTE_B);
     for (int32_t py = y; py < y + h; ++py) {
         for (int32_t px = x; px < x + w; ++px) {
             if (px < 0 || py < 0) continue;
             const std::size_t ux = static_cast<std::size_t>(px);
             const std::size_t uy = static_cast<std::size_t>(py);
-            const std::size_t offset = (uy * SCREEN_WIDTH + ux) * 4;
-            if (offset + 2 >= frame.pixels_rgba.size()) continue;
-            const RgbColor current(frame.pixels_rgba[offset],
-                                   frame.pixels_rgba[offset + 1],
-                                   frame.pixels_rgba[offset + 2]);
+            const uint8_t current = frame.pixel_at(ux, uy);
             if (current == a) {
                 frame.set_pixel(ux, uy, b);
             } else if (current == b) {
@@ -1546,19 +1719,19 @@ void ReferenceRenderer::draw_empty_tank_warning(FrameBuffer320x200& frame,
 
 void ReferenceRenderer::draw_archive_frame(FrameBuffer320x200& frame,
                                            const ImageArchive& archive,
-                                           std::size_t frame_index, float alpha,
-                                           float brightness) const {
+                                           std::size_t frame_index,
+                                           std::size_t palette_base) const {
     if (frame_index >= archive.frames.size()) return;
     for (const auto& fragment : archive.frames[frame_index]) {
-        draw_fragment(frame, fragment, alpha, brightness, 1.0f);
+        draw_fragment(frame, fragment, palette_base, 1.0f);
     }
 }
 
 void ReferenceRenderer::draw_archive_frame_reveal(FrameBuffer320x200& frame,
                                                   const ImageArchive& archive,
                                                   std::size_t frame_index,
-                                                  float progress,
-                                                  float brightness) const {
+                                                  std::size_t palette_base,
+                                                  float progress) const {
     if (frame_index >= archive.frames.size()) return;
     for (const auto& fragment : archive.frames[frame_index]) {
         const uint16_t reveal_width = static_cast<uint16_t>(
@@ -1566,16 +1739,14 @@ void ReferenceRenderer::draw_archive_frame_reveal(FrameBuffer320x200& frame,
         const float frac =
             static_cast<float>(std::max<uint16_t>(reveal_width, 1)) /
             static_cast<float>(fragment.width);
-        draw_fragment(frame, fragment, 1.0f, brightness, frac);
+        draw_fragment(frame, fragment, palette_base, frac);
     }
 }
 
 void ReferenceRenderer::draw_intro_picture(FrameBuffer320x200& frame,
-                                           const ImageFrame& fragment, float mix,
-                                           float white, float brightness,
+                                           const ImageFrame& fragment,
+                                           std::size_t palette_base,
                                            float wipe) const {
-    const float m = std::clamp(mix, 0.0f, 1.0f);
-    const float w = std::clamp(white, 0.0f, 1.0f);
     // The wipe edge counts down 319 -> 0 (@0x484a). A row keeps showing background
     // for that many pixels: from the left on even rows, from the right on odd ones.
     const int32_t edge = static_cast<int32_t>(
@@ -1597,22 +1768,19 @@ void ReferenceRenderer::draw_intro_picture(FrameBuffer320x200& frame,
             const uint8_t pixel_index = fragment.pixels[y * fragment.width + x];
             if (fragment.transparent_zero && pixel_index == 0) continue;
             if (pixel_index >= fragment.palette.colors.size()) continue;
-            RgbColor color = fragment.palette.colors[pixel_index];
-            if (pixel_index < fragment.palette_start.colors.size()) {
-                color =
-                    lerp_color(fragment.palette_start.colors[pixel_index], color, m);
-            }
-            color = lerp_color(color, RgbColor(252, 252, 252), w);
+            const std::size_t slot = palette_base + pixel_index;
+            if (slot > 0xFF) continue;
             frame.set_pixel(static_cast<std::size_t>(screen_x),
                             static_cast<std::size_t>(screen_y),
-                            scale_brightness(color, brightness));
+                            static_cast<uint8_t>(slot));
         }
     }
 }
 
 void ReferenceRenderer::draw_fragment(FrameBuffer320x200& frame,
-                                      const ImageFrame& fragment, float alpha,
-                                      float brightness, float horizontal_fraction) const {
+                                      const ImageFrame& fragment,
+                                      std::size_t palette_base,
+                                      float horizontal_fraction) const {
     const std::size_t draw_width = static_cast<std::size_t>(std::floor(
         static_cast<float>(fragment.width) * std::clamp(horizontal_fraction, 0.0f, 1.0f)));
     for (std::size_t y = 0; y < fragment.height; ++y) {
@@ -1620,24 +1788,26 @@ void ReferenceRenderer::draw_fragment(FrameBuffer320x200& frame,
             const uint8_t pixel_index = fragment.pixels[y * fragment.width + x];
             if (fragment.transparent_zero && pixel_index == 0) continue;
             if (pixel_index >= fragment.palette.colors.size()) continue;
-            const RgbColor color =
-                scale_brightness(fragment.palette.colors[pixel_index], brightness);
-            frame.blend_pixel(static_cast<std::size_t>(fragment.x_offset) + x,
-                              static_cast<std::size_t>(fragment.y_offset) + y, color,
-                              alpha);
+            const std::size_t slot = palette_base + pixel_index;
+            if (slot > 0xFF) continue;
+            frame.set_pixel(static_cast<std::size_t>(fragment.x_offset) + x,
+                            static_cast<std::size_t>(fragment.y_offset) + y,
+                            static_cast<uint8_t>(slot));
         }
     }
 }
 
 void ReferenceRenderer::draw_sprite(FrameBuffer320x200& frame,
                                     const ImageFrame& sprite, int32_t dest_x,
-                                    int32_t dest_y, std::size_t scale) const {
+                                    int32_t dest_y, std::size_t scale,
+                                    std::size_t palette_base) const {
     for (std::size_t y = 0; y < sprite.height; ++y) {
         for (std::size_t x = 0; x < sprite.width; ++x) {
             const uint8_t pixel_index = sprite.pixels[y * sprite.width + x];
             if (sprite.transparent_zero && pixel_index == 0) continue;
             if (pixel_index >= sprite.palette.colors.size()) continue;
-            const RgbColor color = sprite.palette.colors[pixel_index];
+            const std::size_t slot = palette_base + pixel_index;
+            if (slot > 0xFF) continue;
             for (std::size_t sy = 0; sy < scale; ++sy) {
                 for (std::size_t sx = 0; sx < scale; ++sx) {
                     const int32_t px = dest_x + static_cast<int32_t>(x * scale + sx);
@@ -1646,7 +1816,8 @@ void ReferenceRenderer::draw_sprite(FrameBuffer320x200& frame,
                     // Sprites live outside the road's shade range, so mark them as
                     // "not road" and the shadow will leave them alone.
                     frame.set_pixel(static_cast<std::size_t>(px),
-                                    static_cast<std::size_t>(py), color,
+                                    static_cast<std::size_t>(py),
+                                    static_cast<uint8_t>(slot),
                                     FrameBuffer320x200::SHADE_NOT_ROAD);
                 }
             }
@@ -1655,7 +1826,8 @@ void ReferenceRenderer::draw_sprite(FrameBuffer320x200& frame,
 }
 
 void ReferenceRenderer::draw_projected_slice(FrameBuffer320x200& frame,
-                                             const ProjectedRoadSlice& slice) const {
+                                             const ProjectedRoadSlice& slice,
+                                             ScratchColors& scratch) const {
     const std::size_t height = std::max<std::size_t>(sat_sub(slice.bottom_y, slice.top_y), 1);
     for (std::size_t y = slice.top_y; y < std::min(slice.bottom_y, VIEW_BOTTOM_Y); ++y) {
         const float t = static_cast<float>(y - slice.top_y) / static_cast<float>(height);
@@ -1667,10 +1839,12 @@ void ReferenceRenderer::draw_projected_slice(FrameBuffer320x200& frame,
             const int32_t x1 =
                 project_span_x(center, road_width, span.top_end, span.bottom_end, t);
             const int32_t width = std::max(x1 - x0, 1);
-            frame.fill_rect(x0, static_cast<int32_t>(y), width, 1, road_color(span.sample_cell));
-            const RgbColor edge_color = road_edge_color(span.sample_cell);
-            frame.fill_rect(x0, static_cast<int32_t>(y), std::min(2, width), 1, edge_color);
-            frame.fill_rect(x0 + width - 1, static_cast<int32_t>(y), 1, 1, edge_color);
+            frame.fill_rect(x0, static_cast<int32_t>(y), width, 1,
+                            scratch.index_for(road_color(span.sample_cell)));
+            const uint8_t edge_index =
+                scratch.index_for(road_edge_color(span.sample_cell));
+            frame.fill_rect(x0, static_cast<int32_t>(y), std::min(2, width), 1, edge_index);
+            frame.fill_rect(x0 + width - 1, static_cast<int32_t>(y), 1, 1, edge_index);
         }
         if (slice.tunnel_span) {
             const float left_fraction = slice.tunnel_span->first;
@@ -1682,7 +1856,8 @@ void ReferenceRenderer::draw_projected_slice(FrameBuffer320x200& frame,
             const int32_t tunnel_height = static_cast<int32_t>(
                 std::round(static_cast<float>(slice.bottom_y - slice.top_y) * 0.75f));
             frame.fill_rect(x0, static_cast<int32_t>(y) - tunnel_height,
-                            std::max(x1 - x0, 1), 1, RgbColor(84, 60, 48));
+                            std::max(x1 - x0, 1), 1,
+                            scratch.index_for(RgbColor(84, 60, 48)));
         }
     }
 
@@ -1698,10 +1873,12 @@ void ReferenceRenderer::draw_projected_slice(FrameBuffer320x200& frame,
             static_cast<float>(slice.bottom_y - slice.top_y) *
             (1.5f + obstacle.height_factor * 1.5f)));
         const int32_t y_top = static_cast<int32_t>(slice.top_y) - obstacle_height;
-        frame.fill_rect(x0, y_top, width, obstacle_height, obstacle.color);
-        frame.fill_rect(x0, y_top, width, 2, scale_brightness(obstacle.color, 1.2f));
+        frame.fill_rect(x0, y_top, width, obstacle_height,
+                        scratch.index_for(obstacle.color));
+        frame.fill_rect(x0, y_top, width, 2,
+                        scratch.index_for(scale_brightness(obstacle.color, 1.2f)));
         frame.fill_rect(x0 + width - 2, y_top, 2, obstacle_height,
-                        scale_brightness(obstacle.color, 0.7f));
+                        scratch.index_for(scale_brightness(obstacle.color, 0.7f)));
     }
 }
 
@@ -1742,8 +1919,10 @@ void ReferenceRenderer::draw_ship_shadow(FrameBuffer320x200& frame,
                 frame.shade_at(static_cast<std::size_t>(px), static_cast<std::size_t>(py));
             const uint8_t shaded = skyroads::core::dos_shadow_shade(shade);
             if (shaded == shade) continue; // sky, sprite or an already-dark band
+            // Pure index remap, exactly the @0x3437 read-modify-write: the remapped
+            // shade IS the new framebuffer byte (the road band starts at slot 0).
             frame.set_pixel(static_cast<std::size_t>(px), static_cast<std::size_t>(py),
-                            dos_shape_color(LevelCell::empty(), shaded), shaded);
+                            static_cast<uint8_t>(PAL_ROAD_BASE + shaded), shaded);
         }
     }
 }
@@ -1751,14 +1930,15 @@ void ReferenceRenderer::draw_ship_shadow(FrameBuffer320x200& frame,
 
 void ReferenceRenderer::draw_text_centered(FrameBuffer320x200& frame,
                                            const std::string& text, int32_t y,
-                                           RgbColor color, std::size_t scale) const {
+                                           uint8_t color_index,
+                                           std::size_t scale) const {
     const int32_t width = text_pixel_width(text, scale);
     const int32_t x = (static_cast<int32_t>(FRAMEBUFFER_WIDTH) - width) / 2;
-    draw_text(frame, x, y, text, color, scale);
+    draw_text(frame, x, y, text, color_index, scale);
 }
 
 void ReferenceRenderer::draw_text(FrameBuffer320x200& frame, int32_t x, int32_t y,
-                                  const std::string& text, RgbColor color,
+                                  const std::string& text, uint8_t color_index,
                                   std::size_t scale) const {
     int32_t cursor = x;
     for (char ch : text) {
@@ -1778,85 +1958,133 @@ void ReferenceRenderer::draw_text(FrameBuffer320x200& frame, int32_t x, int32_t 
                 frame.fill_rect(cursor + static_cast<int32_t>(col_index * scale),
                                 y + static_cast<int32_t>(row_index * scale),
                                 static_cast<int32_t>(scale),
-                                static_cast<int32_t>(scale), color);
+                                static_cast<int32_t>(scale), color_index);
             }
         }
         cursor += static_cast<int32_t>(4 * scale);
     }
 }
 
-void ReferenceRenderer::draw_debug_overlay(FrameBuffer320x200& frame,
+void ReferenceRenderer::draw_debug_overlay(RenderedFrame& out,
                                            const DemoPlaybackState& scene) const {
+    // The gameplay DAC occupies all 256 slots, so the overlay's synthesized
+    // colours steal the tail of the world band (0xE0..0xFF): backdrop pixels
+    // holding those indices discolour while the overlay is up. Dev tooling.
+    ScratchColors scratch(out.palette, 0xE0, 0xFF);
+    FrameBuffer320x200& frame = out.frame;
     const DerivedShipVisualState visual = derive_ship_visual_state(scene);
     const std::vector<ProjectedRoadSlice> slices = project_road_slices(scene);
     const ShipScreenPlacement placement =
         ship_screen_placement_from_slices(scene, visual, slices);
-    draw_debug_hud_panel(frame, scene, DebugViewMode::Overlay);
-    draw_projected_slice_guides(frame, slices);
-    draw_ship_debug_guides(frame, scene, visual, placement);
-    draw_topdown_inset(frame, scene);
+    draw_debug_hud_panel(frame, scene, DebugViewMode::Overlay, scratch);
+    draw_projected_slice_guides(frame, slices, scratch);
+    draw_ship_debug_guides(frame, scene, visual, placement, scratch);
+    draw_topdown_inset(frame, scene, scratch);
 }
 
-void ReferenceRenderer::render_play_geometry_debug(FrameBuffer320x200& frame,
+void ReferenceRenderer::render_play_geometry_debug(RenderedFrame& out,
                                                    const DemoPlaybackState& scene) const {
+    FrameBuffer320x200& frame = out.frame;
+    Palette256& pal = out.palette;
     const DerivedShipVisualState visual = derive_ship_visual_state(scene);
     const std::vector<ProjectedRoadSlice> slices = project_road_slices(scene);
     const ShipScreenPlacement placement =
         ship_screen_placement_from_slices(scene, visual, slices);
-    frame.clear(RgbColor(8, 8, 14));
+    // This view never runs the TREKDAT pass, so the road band is free for the
+    // synthesized geometry colours; ship and dashboard keep their normal bands,
+    // and the dimmed world backdrop is its band blended over the clear colour.
+    const RgbColor clear_color(8, 8, 14);
+    pal.colors[0] = clear_color;
+    ScratchColors scratch(pal, 0x01, 0x47);
+    if (!assets_.cars.frames.empty() && !assets_.cars.frames[0].empty()) {
+        pal_band_fill(pal, PAL_CARS_BASE,
+                      assets_.cars.frames[0].front().palette.colors);
+    }
+    if (!assets_.dashboard.frames.empty() && !assets_.dashboard.frames[0].empty()) {
+        pal_band_fill(pal, PAL_DASH_BASE,
+                      assets_.dashboard.frames[0].front().palette.colors);
+    }
     const ImageArchive* world = nullptr;
     if (scene.world_index < assets_.worlds.size()) world = &assets_.worlds[scene.world_index];
     else if (!assets_.worlds.empty()) world = &assets_.worlds.front();
-    if (world) draw_archive_frame(frame, *world, 0, 0.25f, 0.45f);
+    if (world && !world->frames.empty() && !world->frames[0].empty()) {
+        pal_band_blend(pal, PAL_WORLD_BASE,
+                       world->frames[0].front().palette.colors, 0.45f, 0.25f,
+                       clear_color);
+    }
+    frame.clear(0);
+    if (world) draw_archive_frame(frame, *world, 0, PAL_WORLD_BASE);
     frame.fill_rect(0, static_cast<int32_t>(HORIZON_Y),
                     static_cast<int32_t>(FRAMEBUFFER_WIDTH),
-                    static_cast<int32_t>(VIEW_BOTTOM_Y - HORIZON_Y), RgbColor(10, 10, 20));
-    for (const auto& slice : slices) draw_projected_slice(frame, slice);
-    draw_projected_slice_guides(frame, slices);
+                    static_cast<int32_t>(VIEW_BOTTOM_Y - HORIZON_Y),
+                    scratch.index_for(RgbColor(10, 10, 20)));
+    for (const auto& slice : slices) draw_projected_slice(frame, slice, scratch);
+    draw_projected_slice_guides(frame, slices, scratch);
     draw_ship_sprite(frame, scene.frame_index, visual, placement);
     draw_ship_shadow(frame, visual, placement);
-    draw_ship_debug_guides(frame, scene, visual, placement);
-    draw_topdown_inset(frame, scene);
-    draw_archive_frame(frame, assets_.dashboard, 0, 1.0f, 1.0f);
-    draw_debug_hud_panel(frame, scene, DebugViewMode::Geometry);
+    draw_ship_debug_guides(frame, scene, visual, placement, scratch);
+    draw_topdown_inset(frame, scene, scratch);
+    draw_archive_frame(frame, assets_.dashboard, 0, PAL_DASH_BASE);
+    draw_debug_hud_panel(frame, scene, DebugViewMode::Geometry, scratch);
 }
 
-void ReferenceRenderer::render_play_topdown_debug(FrameBuffer320x200& frame,
+void ReferenceRenderer::render_play_topdown_debug(RenderedFrame& out,
                                                   const DemoPlaybackState& scene) const {
-    frame.clear(RgbColor(6, 6, 10));
+    FrameBuffer320x200& frame = out.frame;
+    Palette256& pal = out.palette;
+    const RgbColor clear_color(6, 6, 10);
+    pal.colors[0] = clear_color;
+    // Like the geometry view: no TREKDAT pass here, so the road band holds the
+    // map's synthesized colours.
+    ScratchColors scratch(pal, 0x01, 0x47);
+    if (!assets_.dashboard.frames.empty() && !assets_.dashboard.frames[0].empty()) {
+        pal_band_fill(pal, PAL_DASH_BASE,
+                      assets_.dashboard.frames[0].front().palette.colors);
+    }
     const ImageArchive* world = nullptr;
     if (scene.world_index < assets_.worlds.size()) world = &assets_.worlds[scene.world_index];
     else if (!assets_.worlds.empty()) world = &assets_.worlds.front();
-    if (world) draw_archive_frame(frame, *world, 0, 0.20f, 0.40f);
+    if (world && !world->frames.empty() && !world->frames[0].empty()) {
+        pal_band_blend(pal, PAL_WORLD_BASE,
+                       world->frames[0].front().palette.colors, 0.40f, 0.20f,
+                       clear_color);
+    }
+    frame.clear(0);
+    if (world) draw_archive_frame(frame, *world, 0, PAL_WORLD_BASE);
     frame.fill_rect(12, 18, static_cast<int32_t>(FRAMEBUFFER_WIDTH) - 24,
-                    static_cast<int32_t>(VIEW_BOTTOM_Y - 26), RgbColor(16, 18, 26));
-    draw_topdown_map(frame, scene, 20, 26, 280, 104, true);
-    draw_archive_frame(frame, assets_.dashboard, 0, 1.0f, 1.0f);
-    draw_debug_hud_panel(frame, scene, DebugViewMode::TopDown);
+                    static_cast<int32_t>(VIEW_BOTTOM_Y - 26),
+                    scratch.index_for(RgbColor(16, 18, 26)));
+    draw_topdown_map(frame, scene, 20, 26, 280, 104, true, scratch);
+    draw_archive_frame(frame, assets_.dashboard, 0, PAL_DASH_BASE);
+    draw_debug_hud_panel(frame, scene, DebugViewMode::TopDown, scratch);
 }
 
 void ReferenceRenderer::draw_debug_hud_panel(FrameBuffer320x200& frame,
                                              const DemoPlaybackState& scene,
-                                             DebugViewMode mode) const {
+                                             DebugViewMode mode,
+                                             ScratchColors& scratch) const {
     frame.fill_rect(DEBUG_PANEL_X, DEBUG_PANEL_Y, DEBUG_PANEL_W, DEBUG_PANEL_H,
-                    RgbColor(10, 12, 18));
+                    scratch.index_for(RgbColor(10, 12, 18)));
     stroke_rect(frame, DEBUG_PANEL_X, DEBUG_PANEL_Y, DEBUG_PANEL_W, DEBUG_PANEL_H,
-                RgbColor(82, 196, 230));
+                scratch.index_for(RgbColor(82, 196, 230)));
     const auto row_state = renderer_row_state(static_cast<uint16_t>(scene.current_row));
     draw_text(frame, DEBUG_PANEL_X + 4, DEBUG_PANEL_Y + 4, debug_label(mode),
-              RgbColor(244, 233, 146), 1);
+              scratch.index_for(RgbColor(244, 233, 146)), 1);
     char buf[32];
+    const uint8_t info_index = scratch.index_for(RgbColor(190, 220, 255));
     std::snprintf(buf, sizeof(buf), "ROW %03zu", scene.current_row);
-    draw_text(frame, DEBUG_PANEL_X + 4, DEBUG_PANEL_Y + 13, buf, RgbColor(190, 220, 255), 1);
+    draw_text(frame, DEBUG_PANEL_X + 4, DEBUG_PANEL_Y + 13, buf, info_index, 1);
     std::snprintf(buf, sizeof(buf), "GRP %02zu SLT %zu", row_state.road_row_group,
                   row_state.trekdat_slot);
-    draw_text(frame, DEBUG_PANEL_X + 4, DEBUG_PANEL_Y + 22, buf, RgbColor(190, 220, 255), 1);
+    draw_text(frame, DEBUG_PANEL_X + 4, DEBUG_PANEL_Y + 22, buf, info_index, 1);
     draw_text(frame, DEBUG_PANEL_X + 4, DEBUG_PANEL_Y + 31,
-              short_ship_state(scene.ship.state), RgbColor(247, 160, 160), 1);
+              short_ship_state(scene.ship.state),
+              scratch.index_for(RgbColor(247, 160, 160)), 1);
 }
 
 void ReferenceRenderer::draw_projected_slice_guides(
-    FrameBuffer320x200& frame, const std::vector<ProjectedRoadSlice>& slices) const {
+    FrameBuffer320x200& frame, const std::vector<ProjectedRoadSlice>& slices,
+    ScratchColors& scratch) const {
     for (const auto& slice : slices) {
         const int32_t left_top =
             static_cast<int32_t>(std::round(slice.center_top - slice.width_top / 2.0f));
@@ -1866,12 +2094,13 @@ void ReferenceRenderer::draw_projected_slice_guides(
             static_cast<int32_t>(std::round(slice.center_bottom - slice.width_bottom / 2.0f));
         const int32_t right_bottom =
             static_cast<int32_t>(std::round(slice.center_bottom + slice.width_bottom / 2.0f));
-        frame.fill_rect(left_top, static_cast<int32_t>(slice.top_y), 1, 1, RgbColor(110, 255, 170));
-        frame.fill_rect(right_top, static_cast<int32_t>(slice.top_y), 1, 1, RgbColor(110, 255, 170));
+        const uint8_t corner_index = scratch.index_for(RgbColor(110, 255, 170));
+        frame.fill_rect(left_top, static_cast<int32_t>(slice.top_y), 1, 1, corner_index);
+        frame.fill_rect(right_top, static_cast<int32_t>(slice.top_y), 1, 1, corner_index);
         frame.fill_rect(left_bottom, static_cast<int32_t>(sat_sub(slice.bottom_y, 1)), 1, 1,
-                        RgbColor(110, 255, 170));
+                        corner_index);
         frame.fill_rect(right_bottom, static_cast<int32_t>(sat_sub(slice.bottom_y, 1)), 1, 1,
-                        RgbColor(110, 255, 170));
+                        corner_index);
         for (const auto& obstacle : slice.obstacles) {
             const int32_t x0 = static_cast<int32_t>(std::round(
                 slice.center_bottom - slice.width_bottom / 2.0f +
@@ -1884,7 +2113,7 @@ void ReferenceRenderer::draw_projected_slice_guides(
                 (1.5f + obstacle.height_factor * 1.5f)));
             const int32_t y0 = static_cast<int32_t>(slice.top_y) - height;
             stroke_rect(frame, x0, y0, std::max(x1 - x0, 2), std::max(height, 2),
-                        RgbColor(255, 122, 122));
+                        scratch.index_for(RgbColor(255, 122, 122)));
         }
         if (slice.tunnel_span) {
             const int32_t x0 = static_cast<int32_t>(std::round(
@@ -1896,7 +2125,8 @@ void ReferenceRenderer::draw_projected_slice_guides(
             const int32_t tunnel_height = static_cast<int32_t>(std::round(
                 static_cast<float>(slice.bottom_y - slice.top_y) * 0.75f));
             frame.fill_rect(x0, static_cast<int32_t>(slice.top_y) - tunnel_height,
-                            std::max(x1 - x0, 1), 1, RgbColor(255, 179, 87));
+                            std::max(x1 - x0, 1), 1,
+                            scratch.index_for(RgbColor(255, 179, 87)));
         }
     }
 }
@@ -1904,7 +2134,8 @@ void ReferenceRenderer::draw_projected_slice_guides(
 void ReferenceRenderer::draw_ship_debug_guides(FrameBuffer320x200& frame,
                                                const DemoPlaybackState& scene,
                                                const DerivedShipVisualState& visual,
-                                               ShipScreenPlacement placement) const {
+                                               ShipScreenPlacement placement,
+                                               ScratchColors& scratch) const {
     if (!car_atlas_) return;
     const ImageFrame& sprite = car_atlas_->select_sprite(visual, scene.frame_index);
     const std::size_t draw_width = static_cast<std::size_t>(sprite.width) * SHIP_SCALE;
@@ -1912,25 +2143,28 @@ void ReferenceRenderer::draw_ship_debug_guides(FrameBuffer320x200& frame,
     const int32_t x = placement.sprite_center_x - (static_cast<int32_t>(draw_width) / 2);
     const int32_t y = placement.sprite_center_y - (static_cast<int32_t>(draw_height) / 2);
     stroke_rect(frame, x, y, static_cast<int32_t>(draw_width),
-                static_cast<int32_t>(draw_height), RgbColor(100, 220, 255));
+                static_cast<int32_t>(draw_height),
+                scratch.index_for(RgbColor(100, 220, 255)));
+    const uint8_t cross_index = scratch.index_for(RgbColor(255, 230, 120));
     frame.fill_rect(placement.sprite_center_x - 8, placement.sprite_center_y, 16, 1,
-                    RgbColor(255, 230, 120));
+                    cross_index);
     frame.fill_rect(placement.sprite_center_x, placement.sprite_center_y - 8, 1, 16,
-                    RgbColor(255, 230, 120));
+                    cross_index);
 }
 
 void ReferenceRenderer::draw_topdown_inset(FrameBuffer320x200& frame,
-                                           const DemoPlaybackState& scene) const {
+                                           const DemoPlaybackState& scene,
+                                           ScratchColors& scratch) const {
     draw_topdown_map(frame, scene, DEBUG_TOPDOWN_INSET_X, DEBUG_TOPDOWN_INSET_Y,
-                     DEBUG_TOPDOWN_INSET_W, DEBUG_TOPDOWN_INSET_H, false);
+                     DEBUG_TOPDOWN_INSET_W, DEBUG_TOPDOWN_INSET_H, false, scratch);
 }
 
 void ReferenceRenderer::draw_topdown_map(FrameBuffer320x200& frame,
                                          const DemoPlaybackState& scene, int32_t x,
                                          int32_t y, int32_t w, int32_t h,
-                                         bool large) const {
-    frame.fill_rect(x, y, w, h, RgbColor(8, 10, 14));
-    stroke_rect(frame, x, y, w, h, RgbColor(82, 196, 230));
+                                         bool large, ScratchColors& scratch) const {
+    frame.fill_rect(x, y, w, h, scratch.index_for(RgbColor(8, 10, 14)));
+    stroke_rect(frame, x, y, w, h, scratch.index_for(RgbColor(82, 196, 230)));
     if (scene.rows.empty()) return;
     const int32_t row_h = std::max(h - 8, 7) /
                           std::max<int32_t>(static_cast<int32_t>(scene.rows.size()), 1);
@@ -1942,15 +2176,16 @@ void ReferenceRenderer::draw_topdown_map(FrameBuffer320x200& frame,
         for (std::size_t col_idx = 0; col_idx < row.cells.size(); ++col_idx) {
             const int32_t cell_x = x + 4 + static_cast<int32_t>(col_idx) * col_w;
             frame.fill_rect(cell_x, cell_y, std::max(col_w, 2) - 1, std::max(row_h, 2) - 1,
-                            debug_cell_color(row.cells[col_idx]));
+                            scratch.index_for(debug_cell_color(row.cells[col_idx])));
             if (row.cells[col_idx].has_tunnel) {
                 stroke_rect(frame, cell_x + 1, cell_y + 1, std::max(std::max(col_w, 3) - 3, 1),
-                            std::max(std::max(row_h, 3) - 3, 1), RgbColor(255, 178, 90));
+                            std::max(std::max(row_h, 3) - 3, 1),
+                            scratch.index_for(RgbColor(255, 178, 90)));
             }
         }
         if (row.row_index == (scene.current_row >> 3)) {
             stroke_rect(frame, x + 3, cell_y - 1, w - 6, std::max(row_h, 2) + 1,
-                        RgbColor(255, 240, 120));
+                        scratch.index_for(RgbColor(255, 240, 120)));
         }
     }
     const double row_start =
@@ -1966,18 +2201,27 @@ void ReferenceRenderer::draw_topdown_map(FrameBuffer320x200& frame,
         x + 4 + static_cast<int32_t>(ship_col * static_cast<double>(std::max(w - 8, 1)));
     const int32_t ship_y =
         y + 4 + static_cast<int32_t>(ship_row * static_cast<double>(std::max(h - 8, 1)));
-    frame.fill_rect(ship_x - 2, ship_y - 2, 5, 5, RgbColor(112, 214, 255));
+    frame.fill_rect(ship_x - 2, ship_y - 2, 5, 5,
+                    scratch.index_for(RgbColor(112, 214, 255)));
     if (large) {
-        draw_text(frame, x + 4, y - 10, "TOPDOWN", RgbColor(244, 233, 146), 1);
+        draw_text(frame, x + 4, y - 10, "TOPDOWN",
+                  scratch.index_for(RgbColor(244, 233, 146)), 1);
     }
 }
 
-uint64_t frame_hash(const FrameBuffer320x200& frame) {
+uint64_t frame_hash(const FrameBuffer320x200& frame, const Palette256& palette) {
+    // Hash the palette-expanded RGBA bytes, not the raw indices: the values stay
+    // identical to the RGBA-era renderer's hashes, which is the proof that the
+    // indexed re-plumb is pixel-exact.
     uint64_t acc = 0;
-    for (uint8_t value : frame.pixels_rgba) {
+    for (uint8_t value : expand_rgba(frame, palette)) {
         acc = acc * 16777619ull + static_cast<uint64_t>(value);
     }
     return acc;
+}
+
+uint64_t frame_hash(const RenderedFrame& rendered) {
+    return frame_hash(rendered.frame, rendered.palette);
 }
 
 } // namespace skyroads::renderer
