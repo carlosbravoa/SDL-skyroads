@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=SkyRoads
+GenericName=Arcade racing game
+Comment=Faithful native port of the 1993 DOS game SkyRoads
+Exec=skyroads-native
+Icon=${SNAP}/meta/gui/skyroads-native.png
+Terminal=false
+Categories=Game;ArcadeGame;
+Keywords=skyroads;retro;dos;racing;arcade;
