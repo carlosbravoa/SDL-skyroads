@@ -369,6 +369,17 @@ static void test_dos_font_table() {
 // Dying replays the same road via @0x339, which is inside the road loop and past the
 // random song pick at @0x296-0x2cc -- so the track keeps playing across every retry
 // and only changes when you go back to the level select and start a road again.
+// The gameplay track is genuinely random (@0x19c reads the PIT counters), so a test
+// can only assert the contract the original guarantees: one of the twelve in-game
+// tracks, and never the same one twice running.
+static uint8_t only_gameplay_song(const AppTickResult& tick) {
+    CHECK_EQ(tick.audio_commands.size(), static_cast<std::size_t>(1));
+    const AudioCommand& c = tick.audio_commands.front();
+    CHECK_TRUE(c.kind == AudioCommandKind::PlaySong);
+    CHECK_TRUE(c.value >= 2 && c.value <= 13);
+    return c.value;
+}
+
 static void test_app_track_survives_death(const RoadsArchive& roads,
                                           const DemoRecording& demo) {
     AttractModeApp app = make_app(roads, demo);
@@ -377,8 +388,7 @@ static void test_app_track_survives_death(const RoadsArchive& roads,
     app.tick(key(&AppInput::enter));
     AppTickResult start = app.tick(key(&AppInput::enter));
     CHECK_TRUE(start.mode == AppMode::Gameplay);
-    CHECK_EQ(start.audio_commands,
-             (std::vector<AudioCommand>{AudioCommand::play_song(2)}));
+    const uint8_t first_track = only_gameplay_song(start);
 
     // Kill the ship and run out the death dwell: not one song command may appear.
     app.gameplay_session().ship.state = ShipState::Exploded;
@@ -401,8 +411,8 @@ static void test_app_track_survives_death(const RoadsArchive& roads,
     CHECK_EQ(back.audio_commands,
              (std::vector<AudioCommand>{AudioCommand::play_song(1)}));
     AppTickResult again = app.tick(key(&AppInput::enter));
-    CHECK_EQ(again.audio_commands,
-             (std::vector<AudioCommand>{AudioCommand::play_song(3)}));
+    const uint8_t second_track = only_gameplay_song(again);
+    CHECK_TRUE(second_track != first_track); // never twice running (@0x2ab-0x2c0)
 }
 
 static void test_app_settings_menu(const RoadsArchive& roads,
@@ -487,10 +497,8 @@ static void test_app_start_gameplay(const RoadsArchive& roads,
     AppTickResult tick = app.tick(key(&AppInput::enter));
     CHECK_TRUE(tick.mode == AppMode::Gameplay);
     CHECK_TRUE(tick.render_scene.tag == RenderScene::Tag::Gameplay);
-    // Gameplay uses the twelve in-game tracks (songs 2..13), starting at 2 and
-    // never repeating back to back, rather than one fixed song.
-    CHECK_EQ(tick.audio_commands,
-             (std::vector<AudioCommand>{AudioCommand::play_song(2)}));
+    // One of the twelve in-game tracks, picked at random, rather than a fixed song.
+    only_gameplay_song(tick);
 }
 
 static void test_app_select_navigates_world(const RoadsArchive& roads,

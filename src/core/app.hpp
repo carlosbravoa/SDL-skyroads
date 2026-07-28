@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <random>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -288,7 +289,12 @@ private:
     bool awaiting_advance_release_;
     // Ticks the "Road Completed" banner has been on screen, and whether the road
     // being played was the last uncompleted one (which makes it "The End" instead).
+    // Previous track index, so a pick can be stepped when it would repeat.
     std::size_t gameplay_song_pick_ = 0;
+    // The original's entropy is live PIT counter reads, which a modern host has no
+    // equivalent of; seeded per run so the tracks are genuinely unpredictable, as
+    // they are on hardware.
+    std::mt19937 rng_{std::random_device{}()};
     std::size_t win_message_ticks_ = 0;
     std::size_t road_end_ticks_ = 0;
     bool current_road_is_final_ = false;
