@@ -1583,13 +1583,19 @@ void ReferenceRenderer::render_play_scene_incremental(
         c.frame_primed = true;
     } else {
         // Previous ship sprite, wherever it was (it may sit above the band).
-        const std::size_t sy0 = static_cast<std::size_t>(std::max(c.ship_y0, 0));
+        // BOTH ends clamp into the frame: a ship falling off at the far right
+        // of the screen puts ship_x0 past 320, and max()-only clamping made
+        // sx1 - sx0 negative -> a wild memcpy (the field freeze with amber
+        // trap bars; reproduced under ASan as negative-size-param).
+        const std::size_t sy0 = static_cast<std::size_t>(std::clamp(
+            c.ship_y0, 0, static_cast<int32_t>(FRAMEBUFFER_HEIGHT)));
         const std::size_t sy1 = static_cast<std::size_t>(std::clamp(
             c.ship_y1, 0, static_cast<int32_t>(FRAMEBUFFER_HEIGHT)));
-        const std::size_t sx0 = static_cast<std::size_t>(std::max(c.ship_x0, 0));
+        const std::size_t sx0 = static_cast<std::size_t>(std::clamp(
+            c.ship_x0, 0, static_cast<int32_t>(FRAMEBUFFER_WIDTH)));
         const std::size_t sx1 = static_cast<std::size_t>(std::clamp(
             c.ship_x1, 0, static_cast<int32_t>(FRAMEBUFFER_WIDTH)));
-        for (std::size_t y = sy0; y < sy1; ++y) {
+        for (std::size_t y = sy0; y < sy1 && sx0 < sx1; ++y) {
             std::memcpy(f.pixels.data() + y * FRAMEBUFFER_WIDTH + sx0,
                         u.pixels.data() + y * FRAMEBUFFER_WIDTH + sx0, sx1 - sx0);
         }
