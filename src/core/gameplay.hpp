@@ -153,10 +153,14 @@ constexpr std::size_t EXPLOSION_DEATH_TICKS = 42;
 constexpr std::size_t OTHER_DEATH_TICKS = 108;
 // Falling off the road: the EXE dwells the full OTHER_DEATH_TICKS (108 ticks = 3.0s
 // at the original's 36Hz tick -- PIT divisor 6628 -> 180Hz, ISR ticks 2 per 10
-// interrupts). Play-testing against the original says the fall was clearly shorter
-// than that, and by ~this point the ship has dropped out of sight anyway, so this is
-// a deliberate, tunable divergence. Raise to OTHER_DEATH_TICKS for the literal EXE
-// behaviour.
+// interrupts). This 45 is a deliberate divergence from play-testing, kept tunable.
+//
+// WORTH RE-TESTING. It was chosen while handle_fall_below_ground still zeroed every
+// velocity, so a fall was a motionless ship dropping on the spot -- three seconds of
+// that feels like the game has hung. Now that the fall keeps its forward speed, the
+// ship only clears the bottom of the dashboard (y < 19) at about tick 67, so 45 cuts
+// away while it is still plainly on screen mid-plunge, and 108 lets it vanish and
+// then holds about a second. The original value may simply be right now.
 constexpr std::size_t FALL_DEATH_TICKS = 45;
 
 struct GameplaySession {
