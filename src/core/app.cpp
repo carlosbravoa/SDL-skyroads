@@ -97,11 +97,15 @@ void emit_sfx_for_events(const std::vector<GameplayEvent>& events,
     for (GameplayEvent event : events) {
         std::optional<uint8_t> sfx;
         switch (event) {
-            // SFX indices verified from the executable (player @0x3c2): bump=0,
-            // bounce=1 (the heavy machine thud), explode=2, refill=4. The port
-            // previously used bounce=3 (a short beep) and explode=1.
-            case GameplayEvent::ShipBumpedWall: sfx = 0; break;
-            case GameplayEvent::ShipExploded: sfx = 2; break;
+            // RVSTACK: full call-site census of the SFX player @0x3c2 —
+            // every `push 0` site arms the death timer ds:0x4578 first
+            // (0x1ac5, 0x22fa, 0x27c3), so 0 = EXPLOSION; the survivable
+            // wall-slide sites 0x2742/0x277f/0x280c push 2 = BUMP. The
+            // earlier "bump=0, explode=2" note had these inverted, which
+            // played the explosion an octave up on every wall graze.
+            // bounce=1 @0x247d and refill=4 @0x1af6 were already right.
+            case GameplayEvent::ShipBumpedWall: sfx = 2; break;
+            case GameplayEvent::ShipExploded: sfx = 0; break;
             case GameplayEvent::ShipBounced: sfx = 1; break;
             case GameplayEvent::ShipRefilled: sfx = 4; break;
         }
