@@ -117,6 +117,25 @@ void emit_sfx_for_events(const std::vector<GameplayEvent>& events,
 
 // The simulation runs in integer fixed point; this is the once-per-tick
 // boundary where the renderer's double view of the ship is produced.
+// The shadow's support surface, the EXE's way (@0xc95-0xd92): the surface
+// height is re-sampled EVERY frame at x±7.0 units (±0x380 raw) around the
+// ship at its current z, taking the HIGHER of the two. Jumping over a raised
+// block, the support climbs to the block top and the shadow reappears on it
+// mid-jump; the previous freeze-at-launch support kept it hidden for the
+// whole arc. A column holding a cube supports at the cube top; anything else
+// at road level.
+int32_t shadow_support_128(const GameplaySession& session) {
+    const auto sample = [&](int32_t x_128) -> int32_t {
+        const skyroads::data::LevelCell cell = session.level.get_cell_fp16(
+            x_128 * 512, session.ship.z_position_fp16);
+        if (cell.cube_height.has_value())
+            return static_cast<int32_t>(*cell.cube_height) << 7;
+        return skyroads::data::GROUND_Y_128;
+    };
+    return std::max(sample(session.ship.x_position_128 - 0x380),
+                    sample(session.ship.x_position_128 + 0x380));
+}
+
 ShipRenderState build_ship_render_state(const GameplaySession& session) {
     ShipRenderState s;
     s.x_position = session.ship.x_position_128 / 128.0;
@@ -129,12 +148,7 @@ ShipRenderState build_ship_render_state(const GameplaySession& session) {
     s.state = session.ship.state;
     s.is_on_ground = session.ship.is_on_ground;
     s.is_going_up = session.ship.is_going_up;
-    // Resting on a surface: that surface is right under us. Airborne: the surface we
-    // left. Either way the shadow lands on solid ground rather than a fixed row.
-    s.support_y = (session.ship.is_on_ground
-                       ? session.ship.y_position_128
-                       : session.ship.jumped_from_y_position_128) /
-                  128.0;
+    s.support_y = shadow_support_128(session) / 128.0;
     s.turn_input = session.last_controls.turn_input;
     s.accel_input = session.last_controls.accel_input;
     s.jump_input = session.last_controls.jump_input;
