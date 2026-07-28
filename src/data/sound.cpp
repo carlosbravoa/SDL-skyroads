@@ -3,7 +3,10 @@
 namespace skyroads::data {
 
 Pcm8Sample load_intro_snd_bytes(const Bytes& data) {
-    return Pcm8Sample{SAMPLE_RATE_PCM_8K, data};
+    // RVSTACK: the intro player @0x4768 pushes DSP Time Constant 0x5A as an
+    // immediate (no header byte in the file): rate = 1e6/(256-0x5A) = 6024 Hz.
+    // The old hard-coded 8000 played the 5.3 s sample 33% fast and high.
+    return Pcm8Sample{1000000u / (256u - 0x5A), data};
 }
 
 Pcm8Sample load_intro_snd_path(const std::string& path) {
@@ -59,8 +62,19 @@ SfxBank load_sfx_snd_bytes(const Bytes& data) {
         entry.index = index;
         entry.start = start;
         entry.end = end;
-        entry.sample.sample_rate = SAMPLE_RATE_PCM_8K;
-        entry.sample.samples.assign(data.begin() + start, data.begin() + end);
+        // RVSTACK: each entry's FIRST byte is the Sound Blaster Time Constant
+        // the DOS player feeds to DSP cmd 0x40 (@0x440-0x449 pulls it out,
+        // @0x5b7e programs it): rate = 1e6/(256-TC). The shipped bank:
+        // explosion TC 0x06 = 4000 Hz, bump TC 0xEC = 50000 Hz, bounce/
+        // alarm/refill TC 0x83 = 8000 Hz. The old code played the TC byte as
+        // a sample and everything at a flat 8000.
+        if (end - start >= 2) {
+            const uint8_t tc = data[start];
+            entry.sample.sample_rate = 1000000u / (256u - tc);
+            entry.sample.samples.assign(data.begin() + start + 1, data.begin() + end);
+        } else {
+            entry.sample.sample_rate = SAMPLE_RATE_PCM_8K;
+        }
         bank.effects.push_back(std::move(entry));
     }
     return bank;

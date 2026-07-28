@@ -48,13 +48,13 @@ static void test_car_atlas() {
 static void test_intro_menu_non_empty() {
     ReferenceRenderer renderer(load_assets());
     AttractModeApp app = make_app();
-    FrameBuffer320x200 intro = renderer.render_scene(app.tick(AppInput{}).render_scene);
+    RenderedFrame intro = renderer.render_scene(app.tick(AppInput{}).render_scene);
     CHECK_TRUE(frame_hash(intro) != 0);
 
     for (int i = 0; i < 35; ++i) app.tick(AppInput{});
     AppInput space;
     space.space = true;
-    FrameBuffer320x200 menu = renderer.render_scene(app.tick(space).render_scene);
+    RenderedFrame menu = renderer.render_scene(app.tick(space).render_scene);
     CHECK_TRUE(frame_hash(menu) != frame_hash(intro));
 }
 
@@ -66,13 +66,16 @@ static void test_gameplay_playfield() {
     app.tick(space);
     AppInput enter; enter.enter = true;
     auto gameplay = app.tick(enter);
-    FrameBuffer320x200 frame = renderer.render_scene(gameplay.render_scene);
+    RenderedFrame rendered = renderer.render_scene(gameplay.render_scene);
+    const skyroads::data::Bytes rgba =
+        expand_rgba(rendered.frame, rendered.palette);
+    const std::size_t width = rendered.frame.width;
 
     std::size_t non_black = 0;
     for (std::size_t y = 30; y < 138; ++y) {
-        for (std::size_t x = 0; x < frame.width; ++x) {
-            const std::size_t o = (y * frame.width + x) * 4;
-            if (frame.pixels_rgba[o] || frame.pixels_rgba[o + 1] || frame.pixels_rgba[o + 2]) {
+        for (std::size_t x = 0; x < width; ++x) {
+            const std::size_t o = (y * width + x) * 4;
+            if (rgba[o] || rgba[o + 1] || rgba[o + 2]) {
                 non_black += 1;
             }
         }
@@ -88,15 +91,18 @@ static void test_gameplay_ship_pixels() {
     AppInput enter; enter.enter = true; app.tick(enter);
     AppInput up; up.up_held = true;
     auto gameplay = app.tick(up);
-    FrameBuffer320x200 frame = renderer.render_scene(gameplay.render_scene);
+    RenderedFrame rendered = renderer.render_scene(gameplay.render_scene);
+    const skyroads::data::Bytes rgba =
+        expand_rgba(rendered.frame, rendered.palette);
+    const std::size_t width = rendered.frame.width;
 
     std::size_t ship_pixels = 0;
     for (std::size_t y = 52; y < 104; ++y) {
         for (std::size_t x = 120; x < 200; ++x) {
-            const std::size_t o = (y * frame.width + x) * 4;
-            const uint8_t r = frame.pixels_rgba[o];
-            const uint8_t g = frame.pixels_rgba[o + 1];
-            const uint8_t b = frame.pixels_rgba[o + 2];
+            const std::size_t o = (y * width + x) * 4;
+            const uint8_t r = rgba[o];
+            const uint8_t g = rgba[o + 1];
+            const uint8_t b = rgba[o + 2];
             if (b > 90 && b > r && b > g) ship_pixels += 1;
         }
     }

@@ -479,10 +479,14 @@ int run(const std::string& source_root) {
 
         fill_audio_queue(audio_device, audio_mixer);
 
-        renderer::FrameBuffer320x200 frame =
+        renderer::RenderedFrame rendered =
             reference_renderer.render_scene_with_debug(current_scene, debug_view);
-        SDL_UpdateTexture(texture, nullptr, frame.pixels_rgba.data(),
-                          static_cast<int>(frame.width) * 4);
+        // The renderer hands back mode-13h-style indices plus a palette; expand
+        // to RGBA only here, at the host boundary.
+        const data::Bytes rgba =
+            renderer::expand_rgba(rendered.frame, rendered.palette);
+        SDL_UpdateTexture(texture, nullptr, rgba.data(),
+                          static_cast<int>(rendered.frame.width) * 4);
         SDL_SetRenderDrawColor(presenter, 0, 0, 0, 255);
         SDL_RenderClear(presenter);
         SDL_RenderCopy(presenter, texture, nullptr, nullptr);

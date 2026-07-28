@@ -34,15 +34,27 @@ static void test_image() {
 }
 
 static void test_sound() {
+    // Rates come from the EXE's Sound Blaster programming, not a constant:
+    // the intro player @0x4768 pushes DSP Time Constant 0x5A as an immediate
+    // (rate = 1e6/(256-TC) = 6024 Hz), and each SFX entry's first byte is its
+    // own TC (@0x440-0x449 pulls it, @0x5b7e programs it) — so payloads are
+    // one byte shorter than the raw entry and each carries its rate.
     Pcm8Sample intro = load_intro_snd_path(check::asset("INTRO.SND"));
-    CHECK_EQ(intro.sample_rate, static_cast<uint32_t>(8000));
+    CHECK_EQ(intro.sample_rate, static_cast<uint32_t>(6024));
     CHECK_EQ(intro.sample_count(), static_cast<std::size_t>(32100));
 
     SfxBank sfx = load_sfx_snd_path(check::asset("SFX.SND"));
     CHECK_EQ(sfx.effect_count(), static_cast<std::size_t>(6));
     std::vector<std::size_t> lengths;
-    for (const auto& e : sfx.effects) lengths.push_back(e.sample.sample_count());
-    CHECK_EQ(lengths, (std::vector<std::size_t>{3984, 5154, 8085, 801, 7771, 0}));
+    std::vector<uint32_t> rates;
+    for (const auto& e : sfx.effects) {
+        lengths.push_back(e.sample.sample_count());
+        rates.push_back(e.sample.sample_rate);
+    }
+    CHECK_EQ(lengths, (std::vector<std::size_t>{3983, 5153, 8084, 800, 7770, 0}));
+    // explosion 4000 Hz (TC 0x06), bounce 8000 (0x83), bump 50000 (0xEC),
+    // alarm/refill 8000; the empty slot keeps the loader default.
+    CHECK_EQ(rates, (std::vector<uint32_t>{4000, 8000, 50000, 8000, 8000, 8000}));
 }
 
 static void test_dashboard() {

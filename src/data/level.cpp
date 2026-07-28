@@ -110,10 +110,91 @@ bool is_inside_tunnel_y(double y_pos, double distance_from_center,
            y_pos >= 80.0;
 }
 
+// ---- integer fixed-point collision core --------------------------------------
+// The exact integer images of the double probes above, in the DOS EXE's own
+// units (x/y 1/128, z 16.16). The simulation tick runs only on these; the
+// double versions remain for the renderer and the reference tests. Every value
+// the tick produces is a multiple of 1/128 (or 1/65536 for z), which doubles
+// represent exactly, so for on-grid inputs these return bit-identical answers.
+
+constexpr int32_t EMPTY_COLLISION_MIN_Y_128 = 0x1E80;
+constexpr int32_t EMPTY_COLLISION_MAX_Y_128 = 80 * 128;
+constexpr int32_t TUNNEL_ENTRY_MIN_Y_128 = 0x2180;
+constexpr int32_t TUNNEL_BASE_Y_128 = 68 * 128;
+constexpr int32_t PROBE_RADIUS_X_128 = 14 * 128;
+
+// Floor division for a positive divisor (C++ `/` truncates toward zero).
+inline int32_t floor_div(int32_t value, int32_t divisor) {
+    int32_t quotient = value / divisor;
+    if (value % divisor != 0 && value < 0) quotient -= 1;
+    return quotient;
+}
+
+struct DistanceFromCenter128 {
+    int32_t distance_128;
+    int32_t var_a_128;
+};
+
+// Integer image of distance_from_center: C++ `%` truncates toward zero exactly
+// like fmod, and "1.0 - distance" is 128 raw.
+DistanceFromCenter128 distance_from_center_128(int32_t x_128) {
+    int32_t distance = 23 * 128 - (x_128 - 49 * 128) % (46 * 128);
+    int32_t var_a = -46 * 128;
+    if (distance < 0) {
+        distance = 128 - distance;
+        var_a = -var_a;
+    }
+    return {distance, var_a};
+}
+
+// std::round is half away from zero; every distance that reaches these checks
+// is non-negative, so `(d + 64) >> 7` reproduces it.
+bool is_inside_tile_y_128(int32_t y_128, int32_t distance_128,
+                          const LevelCell& cell) {
+    const int32_t distance_index = (distance_128 + 64) >> 7;
+    if (distance_index > 37) {
+        return false;
+    }
+    const int32_t y2 = y_128 - TUNNEL_BASE_Y_128;
+    const bool has_cube = cell.cube_height.has_value();
+    if (cell.has_tunnel && !has_cube) {
+        return y2 > static_cast<int32_t>(TUNNEL_LOWS[distance_index]) * 128 &&
+               y2 < static_cast<int32_t>(TUNNEL_CEILS[distance_index]) * 128;
+    }
+    if (!cell.has_tunnel && has_cube) {
+        return y_128 < static_cast<int32_t>(*cell.cube_height) * 128;
+    }
+    if (cell.has_tunnel && has_cube) {
+        return y2 > static_cast<int32_t>(TUNNEL_LOWS[distance_index]) * 128 &&
+               y_128 < static_cast<int32_t>(*cell.cube_height) * 128;
+    }
+    return false;
+}
+
+bool is_inside_tunnel_y_128(int32_t y_128, int32_t distance_128,
+                            const LevelCell& cell) {
+    const int32_t distance_index = (distance_128 + 64) >> 7;
+    if (distance_index > 29) {
+        return false;
+    }
+    const int32_t y2 = y_128 - TUNNEL_BASE_Y_128;
+    return cell.has_tunnel && cell.has_tile &&
+           y2 < static_cast<int32_t>(TUNNEL_LOWS[distance_index]) * 128 &&
+           y_128 >= 80 * 128;
+}
+
 } // namespace
 
 double Level::gravity_acceleration() const {
     return -(std::floor(static_cast<double>(gravity) * 0x1680 / 0x190)) / 128.0;
+}
+
+// The DOS form is a straight integer division; the double `floor(g * 0x1680 /
+// 0x190)` lands on the same value for every 16-bit gravity (the exact quotient
+// g * 14.4 is never within double rounding error of an integer unless it IS
+// one, i.e. g a multiple of 5).
+int32_t Level::gravity_acceleration_128() const {
+    return -(static_cast<int32_t>(gravity) * 0x1680 / 0x190);
 }
 
 LevelCell Level::cell_at_indices(std::size_t x_index, std::size_t z_index) const {
@@ -161,6 +242,72 @@ bool Level::is_inside_tile(double x_pos, double y_pos, double z_pos) const {
     }
     const LevelCell adjacent_tile = get_cell(x_pos + var_a, y_pos, z_pos);
     return is_inside_tile_y(y_pos, 47.0 - distance, adjacent_tile);
+}
+
+// EXE @0x4c0: x is brought to whole units with a /0x80 and offset by -95, and z
+// to a row with `z / 0x2000` then `/ 8` -- the same double-floor the double
+// version does as floor(floor(z*8)/8); the composition of the two positive-
+// divisor floors is floor(z_fp16 / 0x10000).
+LevelCell Level::get_cell_fp16(int32_t x_fp16, int32_t z_fp16) const {
+    const int32_t x = x_fp16 - 95 * 65536;
+    if (!(x >= 0 && x <= 322 * 65536)) {
+        return LevelCell::empty();
+    }
+
+    const int32_t z_row = floor_div(floor_div(z_fp16, 0x2000), 8);
+    const int32_t x_index = x / (46 * 65536);
+    if (z_row < 0) {
+        return LevelCell::empty();
+    }
+
+    return cell_at_indices(static_cast<std::size_t>(x_index),
+                           static_cast<std::size_t>(z_row));
+}
+
+bool Level::is_inside_tile_128(int32_t x_128, int32_t y_128,
+                               int32_t z_fp16) const {
+    const LevelCell left_tile =
+        get_cell_fp16((x_128 - PROBE_RADIUS_X_128) * 512, z_fp16);
+    const LevelCell right_tile =
+        get_cell_fp16((x_128 + PROBE_RADIUS_X_128) * 512, z_fp16);
+
+    if (left_tile.is_empty() && right_tile.is_empty()) {
+        return false;
+    }
+    if (y_128 < EMPTY_COLLISION_MAX_Y_128 && y_128 > EMPTY_COLLISION_MIN_Y_128) {
+        return true;
+    }
+    if (y_128 < TUNNEL_ENTRY_MIN_Y_128) {
+        return false;
+    }
+
+    const auto [distance, var_a] = distance_from_center_128(x_128);
+    const LevelCell center_tile = get_cell_fp16(x_128 * 512, z_fp16);
+    if (is_inside_tile_y_128(y_128, distance, center_tile)) {
+        return true;
+    }
+    const LevelCell adjacent_tile = get_cell_fp16((x_128 + var_a) * 512, z_fp16);
+    return is_inside_tile_y_128(y_128, 47 * 128 - distance, adjacent_tile);
+}
+
+bool Level::is_inside_tunnel_128(int32_t x_128, int32_t y_128,
+                                 int32_t z_fp16) const {
+    const LevelCell left_tile =
+        get_cell_fp16((x_128 - PROBE_RADIUS_X_128) * 512, z_fp16);
+    const LevelCell right_tile =
+        get_cell_fp16((x_128 + PROBE_RADIUS_X_128) * 512, z_fp16);
+
+    if (left_tile.is_empty() && right_tile.is_empty()) {
+        return false;
+    }
+
+    const auto [distance, var_a] = distance_from_center_128(x_128);
+    const LevelCell center_tile = get_cell_fp16(x_128 * 512, z_fp16);
+    if (is_inside_tunnel_y_128(y_128, distance, center_tile)) {
+        return true;
+    }
+    const LevelCell adjacent_tile = get_cell_fp16((x_128 + var_a) * 512, z_fp16);
+    return is_inside_tunnel_y_128(y_128, 47 * 128 - distance, adjacent_tile);
 }
 
 bool Level::is_inside_tunnel(double x_pos, double y_pos, double z_pos) const {

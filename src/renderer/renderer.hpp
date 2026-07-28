@@ -2,14 +2,19 @@
 //
 // The CPU reference renderer: composes intro/menu/help/settings art, world
 // backdrops, the DOS TREKDAT road pass, ship sprites, dashboard, and gauges
-// into a 320x200 RGBA framebuffer. Mirrors the reference module's types and
-// functions 1:1 so `frame_hash` output can be diffed against the reference reference.
+// into a 320x200 8-bit indexed framebuffer plus a 256-entry palette per frame,
+// exactly as the DOS build renders into mode 13h over the VGA DAC. All palette
+// animation (the intro's CMAP slide, the white flash, brightness fades) happens
+// on the palette entries, never per pixel; `expand_rgba` resolves indices
+// through the palette so `frame_hash` output stays diffable against the
+// RGBA-era reference hashes.
 //
 // The road is drawn by the decoded DOS TREKDAT span pipeline (scene_draw @0x2d03):
 // pre-baked run-length spans out of the eight scroll-phase snapshots, dispatched per
 // road cell, with the right half produced by the reverse rasterizer.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -39,10 +44,17 @@ using skyroads::data::LevelCell;
 using skyroads::data::RgbColor;
 using skyroads::data::TrekdatArchive;
 
+// The per-frame VGA DAC state: 256 RGB entries, assembled from the scene's
+// source CMAPs (road palette, archive CMAPs, dashboard) by the render_* methods.
+struct Palette256 {
+    std::array<RgbColor, 256> colors{};
+};
+
 struct FrameBuffer320x200 {
     uint16_t width;
     uint16_t height;
-    Bytes pixels_rgba;
+    // One palette index per pixel, as in mode 13h.
+    Bytes pixels;
     // The DOS build renders into an 8-bit paletted buffer, and the ship's shadow
     // works by READING that buffer back and remapping the index it finds. This plane
     // keeps the road shade behind each pixel so the shadow can do the same; the road
@@ -52,14 +64,46 @@ struct FrameBuffer320x200 {
     static constexpr uint8_t SHADE_NOT_ROAD = 0xFF;
 
     FrameBuffer320x200();
-    void clear(RgbColor color);
+    void clear(uint8_t index);
     void fill_rect(int32_t x, int32_t y, int32_t width, int32_t height,
-                   RgbColor color);
-    void set_pixel(std::size_t x, std::size_t y, RgbColor color);
-    void set_pixel(std::size_t x, std::size_t y, RgbColor color, uint8_t shade);
-    void blend_pixel(std::size_t x, std::size_t y, RgbColor color, float alpha);
+                   uint8_t index);
+    void set_pixel(std::size_t x, std::size_t y, uint8_t index);
+    void set_pixel(std::size_t x, std::size_t y, uint8_t index, uint8_t shade);
+    uint8_t pixel_at(std::size_t x, std::size_t y) const;
     uint8_t shade_at(std::size_t x, std::size_t y) const;
 };
+
+// A rendered frame: the index buffer plus the palette it must be shown through.
+struct RenderedFrame {
+    FrameBuffer320x200 frame;
+    Palette256 palette;
+};
+
+// RVSTACK: state for the incremental play-scene path (the console port).
+// render_play_scene rebuilds all 64000 pixels every frame — a pure function,
+// which is what the equivalence tests need, and also exactly what the DOS
+// game did NOT do on a 386: it drew backdrop + dashboard once per road and
+// per frame rewrote only the road viewport, the ship and the gauges. This
+// cache restores that structure: `underlay` holds clear+backdrop+dashboard
+// for the current road, and the incremental renderer copies back only the
+// bands the previous frame dirtied. Output is byte-identical to the pure
+// path (verified by the twin's SKY_VERIFY dual-render compare).
+struct PlaySceneCache {
+    FrameBuffer320x200 underlay;
+    Palette256 palette;
+    std::vector<RgbColor> road_palette;  // road-change detection
+    std::size_t world_index = static_cast<std::size_t>(-1);
+    bool valid = false;         // underlay/palette match the current road
+    bool frame_primed = false;  // the caller's persistent frame holds last frame
+    // Last frame's ship-sprite rect (the only draw that can leave the road
+    // band upward); spans/shadow are band-clipped, HUD is dashboard-band.
+    int32_t ship_x0 = 0, ship_y0 = 0, ship_x1 = 0, ship_y1 = 0;
+};
+
+// Resolves the index buffer through the palette into the 320x200x4 RGBA bytes
+// the RGBA-era renderer produced (alpha always 255). Used by the SDL host to
+// present and by frame_hash, so hashes stay comparable across the re-plumb.
+Bytes expand_rgba(const FrameBuffer320x200& frame, const Palette256& palette);
 
 struct AttractModeAssets {
     ImageArchive intro;
@@ -147,31 +191,36 @@ public:
     explicit ReferenceRenderer(AttractModeAssets assets);
 
     const AttractModeAssets& assets() const { return assets_; }
-    FrameBuffer320x200 render_scene(const RenderScene& scene) const;
-    FrameBuffer320x200 render_scene_with_debug(const RenderScene& scene,
-                                               DebugViewMode debug_view) const;
+    RenderedFrame render_scene(const RenderScene& scene) const;
+    // RVSTACK: byte-identical to render_play_scene, at the DOS write budget.
+    // `out.frame` must persist across calls (it carries the previous frame);
+    // reset cache.frame_primed after rendering anything else into it.
+    void render_play_scene_incremental(RenderedFrame& out, PlaySceneCache& cache,
+                                       const DemoPlaybackState& scene) const;
+    RenderedFrame render_scene_with_debug(const RenderScene& scene,
+                                          DebugViewMode debug_view) const;
 
 private:
-    void render_intro(FrameBuffer320x200& frame,
-                      const IntroSequenceState& scene) const;
-    void render_main_menu(FrameBuffer320x200& frame,
-                          const MainMenuScene& scene) const;
-    void render_help_menu(FrameBuffer320x200& frame,
-                          const HelpMenuScene& scene) const;
-    void render_settings_menu(FrameBuffer320x200& frame,
+    void render_intro(RenderedFrame& out, const IntroSequenceState& scene) const;
+    void render_main_menu(RenderedFrame& out, const MainMenuScene& scene) const;
+    void render_help_menu(RenderedFrame& out, const HelpMenuScene& scene) const;
+    void render_settings_menu(RenderedFrame& out,
                               const SettingsMenuScene& scene) const;
-    void render_go_menu(FrameBuffer320x200& frame,
-                        const GoMenuScene& scene) const;
-    void render_play_scene(FrameBuffer320x200& frame,
+    void render_go_menu(RenderedFrame& out, const GoMenuScene& scene) const;
+    void render_play_scene(RenderedFrame& out,
                            const DemoPlaybackState& scene) const;
-    void render_play_scene_with_debug(FrameBuffer320x200& frame,
+    // RVSTACK: shared between the pure and incremental play paths.
+    void assemble_play_palette(Palette256& pal,
+                               const DemoPlaybackState& scene) const;
+    const ImageArchive* play_world(const DemoPlaybackState& scene) const;
+    void render_play_scene_with_debug(RenderedFrame& out,
                                       const DemoPlaybackState& scene,
                                       DebugViewMode debug_view) const;
     bool draw_demo_rows_before_ship(FrameBuffer320x200& frame,
                                     const DemoPlaybackState& scene) const;
     void draw_demo_rows_after_ship(FrameBuffer320x200& frame,
                                    const DemoPlaybackState& scene) const;
-    void draw_demo_rows_fallback(FrameBuffer320x200& frame,
+    void draw_demo_rows_fallback(RenderedFrame& out,
                                  const DemoPlaybackState& scene) const;
     void draw_ship_sprite(FrameBuffer320x200& frame, std::size_t frame_index,
                           const DerivedShipVisualState& visual,
@@ -181,67 +230,78 @@ private:
     void draw_dashboard_number(FrameBuffer320x200& frame, int32_t x, int32_t y,
                                int32_t value, std::size_t digits) const;
     void draw_rom_text(FrameBuffer320x200& frame, int32_t x, int32_t y,
-                       const std::string& text, RgbColor color) const;
-    RgbColor dashboard_palette_color(std::size_t index) const;
+                       const std::string& text, uint8_t color_index) const;
     void draw_empty_tank_warning(FrameBuffer320x200& frame,
                                  const DemoPlaybackState& scene) const;
+    // Blits an archive frame's index bytes at `palette_base` + local index; the
+    // band's colours (and any brightness/fade transform) are set on the palette
+    // by the caller.
     void draw_archive_frame(FrameBuffer320x200& frame,
                             const ImageArchive& archive, std::size_t frame_index,
-                            float alpha, float brightness) const;
+                            std::size_t palette_base) const;
     void draw_archive_frame_reveal(FrameBuffer320x200& frame,
                                    const ImageArchive& archive,
-                                   std::size_t frame_index, float progress,
-                                   float brightness) const;
-    // Draws a picture under the intro's palette animation: `mix` slides from the
-    // frame's first CMAP to its second, `white` flashes the result out to full
-    // intensity, and `wipe` is the fraction of each row still left as background by
-    // the interlaced title wipe (even rows uncover from the right, odd from the
-    // left, exactly as the two 0x4184 calls @0x489b/@0x48b1 do).
+                                   std::size_t frame_index,
+                                   std::size_t palette_base,
+                                   float progress) const;
+    // Draws a picture under the intro's interlaced title wipe: `wipe` is the
+    // fraction of each row still left as background (even rows uncover from the
+    // right, odd from the left, exactly as the two 0x4184 calls @0x489b/@0x48b1
+    // do). The palette side of the intro animation -- the CMAP-A -> CMAP-B `mix`
+    // slide and the `white` flash -- is applied to the band's palette entries by
+    // render_intro, as the DOS build reprogrammed the DAC over a fixed buffer.
     void draw_intro_picture(FrameBuffer320x200& frame, const ImageFrame& fragment,
-                            float mix, float white, float brightness,
-                            float wipe) const;
+                            std::size_t palette_base, float wipe) const;
     void draw_fragment(FrameBuffer320x200& frame, const ImageFrame& fragment,
-                       float alpha, float brightness,
+                       std::size_t palette_base,
                        float horizontal_fraction) const;
     void draw_sprite(FrameBuffer320x200& frame, const ImageFrame& sprite,
-                     int32_t dest_x, int32_t dest_y, std::size_t scale) const;
+                     int32_t dest_x, int32_t dest_y, std::size_t scale,
+                     std::size_t palette_base) const;
     void draw_projected_slice(FrameBuffer320x200& frame,
-                              const struct ProjectedRoadSlice& slice) const;
+                              const struct ProjectedRoadSlice& slice,
+                              struct ScratchColors& scratch) const;
     void draw_ship_shadow(FrameBuffer320x200& frame,
                           const DerivedShipVisualState& visual,
                           ShipScreenPlacement placement) const;
     void draw_text_centered(FrameBuffer320x200& frame, const std::string& text,
-                            int32_t y, RgbColor color, std::size_t scale) const;
+                            int32_t y, uint8_t color_index,
+                            std::size_t scale) const;
     void draw_text(FrameBuffer320x200& frame, int32_t x, int32_t y,
-                   const std::string& text, RgbColor color,
+                   const std::string& text, uint8_t color_index,
                    std::size_t scale) const;
-    void draw_debug_overlay(FrameBuffer320x200& frame,
+    void draw_debug_overlay(RenderedFrame& out,
                             const DemoPlaybackState& scene) const;
-    void render_play_geometry_debug(FrameBuffer320x200& frame,
+    void render_play_geometry_debug(RenderedFrame& out,
                                     const DemoPlaybackState& scene) const;
-    void render_play_topdown_debug(FrameBuffer320x200& frame,
+    void render_play_topdown_debug(RenderedFrame& out,
                                    const DemoPlaybackState& scene) const;
     void draw_debug_hud_panel(FrameBuffer320x200& frame,
-                              const DemoPlaybackState& scene,
-                              DebugViewMode mode) const;
+                              const DemoPlaybackState& scene, DebugViewMode mode,
+                              struct ScratchColors& scratch) const;
     void draw_projected_slice_guides(
         FrameBuffer320x200& frame,
-        const std::vector<struct ProjectedRoadSlice>& slices) const;
+        const std::vector<struct ProjectedRoadSlice>& slices,
+        struct ScratchColors& scratch) const;
     void draw_ship_debug_guides(FrameBuffer320x200& frame,
                                 const DemoPlaybackState& scene,
                                 const DerivedShipVisualState& visual,
-                                ShipScreenPlacement placement) const;
+                                ShipScreenPlacement placement,
+                                struct ScratchColors& scratch) const;
     void draw_topdown_inset(FrameBuffer320x200& frame,
-                            const DemoPlaybackState& scene) const;
+                            const DemoPlaybackState& scene,
+                            struct ScratchColors& scratch) const;
     void draw_topdown_map(FrameBuffer320x200& frame,
                           const DemoPlaybackState& scene, int32_t x, int32_t y,
-                          int32_t w, int32_t h, bool large) const;
+                          int32_t w, int32_t h, bool large,
+                          struct ScratchColors& scratch) const;
 
     AttractModeAssets assets_;
     std::optional<CarAtlas> car_atlas_;
 };
 
-uint64_t frame_hash(const FrameBuffer320x200& frame);
+uint64_t frame_hash(const FrameBuffer320x200& frame, const Palette256& palette);
+uint64_t frame_hash(const RenderedFrame& rendered);
 
 DerivedShipVisualState derive_ship_visual_state(const DemoPlaybackState& scene);
 

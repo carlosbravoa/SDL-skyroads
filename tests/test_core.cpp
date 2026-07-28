@@ -1,6 +1,7 @@
 // Equivalence tests for the core layer (planner, gameplay simulation, and app
-// state machine). The demo-frame test asserts the exact IEEE-754 positions the
-// simulation produces -- if the fixed-point float math had drifted, these fail.
+// state machine). The demo-frame test asserts the exact positions the integer
+// fixed-point simulation produces (reported as exact doubles at the snapshot
+// boundary) -- if the fixed-point math drifts, these fail.
 #include <vector>
 
 #include "check.hpp"
@@ -14,6 +15,7 @@ using skyroads::data::load_demo_rec_path;
 using skyroads::data::load_roads_lzs_path;
 using skyroads::data::load_skyroads_exe_path;
 using skyroads::data::GROUND_Y;
+using skyroads::data::GROUND_Y_128;
 using skyroads::data::Level;
 using skyroads::data::RoadsArchive;
 using skyroads::data::SkyroadsExe;
@@ -165,25 +167,32 @@ static void test_later_demo_frames(const RoadsArchive& roads,
     CHECK_TRUE(f1.snapshot.oxygen_percent < f0.snapshot.oxygen_percent);
     CHECK_TRUE(f2.snapshot.oxygen_percent < f1.snapshot.oxygen_percent);
     CHECK_TRUE(f2.snapshot.z_position > f1.snapshot.z_position);
-    CHECK_TRUE(f2.snapshot.fuel_percent < f1.snapshot.fuel_percent);
+    // Fuel burns as the EXE's integer (0x7530 / fuel) * z_vel >> 16 per tick
+    // (@0x2a4e-0x2a76): on the demo road (fuel 130) the truncated decrement is
+    // zero until z_vel reaches 0x11D raw, so the tank sits at exactly full for
+    // the first three frames and dips on the fourth. (The double reference
+    // burned a fractional trickle from frame one.)
+    CHECK_EQ(f2.snapshot.fuel_percent, 1.0);
+    GameplayFrameResult f3 = session.run_demo_frame(demo);
+    CHECK_TRUE(f3.snapshot.fuel_percent < f2.snapshot.fuel_percent);
     CHECK_TRUE(f2.snapshot.craft_state == ShipState::Alive);
 }
 
 static void test_fall_below_ground(const RoadsArchive& roads) {
     Level level = level_from_road_entry(roads.roads[0]);
     GameplaySession session(level);
-    session.ship.x_position = 0.0;
-    session.ship.y_position = GROUND_Y - 1.0;
-    session.ship.y_velocity = -2.0;
-    session.ship.z_velocity = 0.1;
-    session.ship.x_movement_base = 1.0;
+    session.ship.x_position_128 = 0;
+    session.ship.y_position_128 = GROUND_Y_128 - 1 * 128;
+    session.ship.y_velocity_128 = -2 * 128;
+    session.ship.z_velocity_fp16 = 6554; // ~0.1
+    session.ship.x_movement_base_128 = 1 * 128;
 
     GameplayFrameResult frame = session.run_frame(ControllerState::neutral());
     CHECK_TRUE(frame.snapshot.craft_state == ShipState::Fallen);
     CHECK_TRUE(session.death_frame_index.has_value());
-    CHECK_EQ(session.ship.z_velocity, 0.0);
-    CHECK_EQ(session.ship.y_velocity, 0.0);
-    CHECK_EQ(session.ship.x_movement_base, 0.0);
+    CHECK_EQ(session.ship.z_velocity_fp16, 0);
+    CHECK_EQ(session.ship.y_velocity_128, 0);
+    CHECK_EQ(session.ship.x_movement_base_128, 0);
     CHECK_TRUE(frame.events.empty());
 }
 
@@ -194,18 +203,18 @@ static void test_fallen_keeps_falling(const RoadsArchive& roads) {
     Level level = level_from_road_entry(roads.roads[0]);
     GameplaySession session(level);
     session.ship.state = ShipState::Fallen;
-    session.ship.x_position = 220.0;
-    session.ship.y_position = 79.5;
-    session.ship.z_position = 64.25;
-    session.ship.z_velocity = 0.12;
-    session.ship.y_velocity = -1.0;
-    session.ship.x_movement_base = 0.5;
+    session.ship.x_position_128 = 220 * 128;
+    session.ship.y_position_128 = 79 * 128 + 64; // 79.5
+    session.ship.z_position_fp16 = 64 * 65536 + 16384; // 64.25
+    session.ship.z_velocity_fp16 = 7864; // ~0.12
+    session.ship.y_velocity_128 = -1 * 128;
+    session.ship.x_movement_base_128 = 64; // 0.5
 
     Ship before = session.ship;
     GameplayFrameResult frame = session.run_frame(ControllerState::make(1, 1, true));
     CHECK_TRUE(frame.snapshot.craft_state == ShipState::Fallen);
-    CHECK_TRUE(session.ship.y_position < before.y_position);
-    CHECK_TRUE(session.ship.z_position > before.z_position);
+    CHECK_TRUE(session.ship.y_position_128 < before.y_position_128);
+    CHECK_TRUE(session.ship.z_position_fp16 > before.z_position_fp16);
     CHECK_TRUE(frame.events.empty());
 
     // The death animation must run for a while before the result screen shows,
@@ -216,7 +225,7 @@ static void test_fallen_keeps_falling(const RoadsArchive& roads) {
     }
     CHECK_TRUE(session.death_animation_finished());
     // Fallen far enough below road level to be out of the player's view.
-    CHECK_TRUE(session.ship.y_position < GROUND_Y - 25.0);
+    CHECK_TRUE(session.ship.y_position_128 < GROUND_Y_128 - 25 * 128);
 }
 
 // ---- app state machine -----------------------------------------------------
@@ -313,15 +322,15 @@ static void test_app_road_end_flyoff(const RoadsArchive& roads,
     app.gameplay_session().did_win = true;
     // A road is finished at speed; the fly-off just keeps integrating whatever the
     // ship had (@0xe92-0xea0), so give it some.
-    app.gameplay_session().ship.z_velocity = 0.5;
-    const double z_before = app.gameplay_session().ship.z_position;
+    app.gameplay_session().ship.z_velocity_fp16 = 0x8000; // 0.5
+    const int32_t z_before = app.gameplay_session().ship.z_position_fp16;
     for (int i = 0; i < 72; ++i) {
         AppTickResult tick = app.tick(AppInput{});
         CHECK_TRUE(tick.mode == AppMode::Gameplay);
     }
     // The ship kept moving through the fly-off and dropped out of view.
-    CHECK_TRUE(app.gameplay_session().ship.z_position > z_before);
-    CHECK_EQ(app.gameplay_session().ship.y_position, 0.0);
+    CHECK_TRUE(app.gameplay_session().ship.z_position_fp16 > z_before);
+    CHECK_EQ(app.gameplay_session().ship.y_position_128, 0);
     for (int i = 0; i < 27; ++i) app.tick(AppInput{});
     CHECK_TRUE(app.mode() == AppMode::GoMenu);
     CHECK_TRUE(app.road_completions()[0] >= 1);
@@ -613,7 +622,7 @@ static void test_app_death_frame(const RoadsArchive& roads,
 static void test_app_eighth_tile_rows(const RoadsArchive& roads,
                                       const DemoRecording& demo) {
     AttractModeApp app = make_app(roads, demo);
-    app.gameplay_session().ship.z_position = 3.375;
+    app.gameplay_session().ship.z_position_fp16 = 3 * 65536 + 24576; // 3.375
     DemoPlaybackState scene = app.current_gameplay_scene();
     CHECK_EQ(scene.current_row, static_cast<std::size_t>(27));
     CHECK_TRUE(scene.fractional_z == 0.0);
