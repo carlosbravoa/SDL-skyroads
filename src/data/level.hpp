@@ -1,7 +1,9 @@
 // Part of the SkyRoads SDL port
 //
-// Level geometry plus the DOS collision probes. The physics constants are kept
-// as exact `hex / 0x80` fixed-point ratios in double precision.
+// Level geometry plus the DOS collision probes, in two exactly-equivalent
+// forms: the double reference (constants as exact `hex / 0x80` ratios) used by
+// the renderer and tests, and the integer fixed-point core the simulation tick
+// runs on (the target console has no FPU).
 #pragma once
 
 #include <array>
@@ -20,6 +22,15 @@ constexpr double LEVEL_CENTER_X = 0x8000 / 128.0;
 constexpr double LEVEL_MIN_X = 0x2F80 / 128.0;
 constexpr double LEVEL_MAX_X = 0xD080 / 128.0;
 constexpr double GROUND_Y = 0x2800 / 128.0;
+
+// The same landmarks in the DOS EXE's own fixed-point units: x/y are 16-bit
+// words in 1/128 units ("_128"), z is a 32-bit 16.16 value ("_fp16"). The
+// simulation runs entirely on these; the doubles above serve the renderer and
+// the reference implementation.
+constexpr int32_t LEVEL_CENTER_X_128 = 0x8000;
+constexpr int32_t LEVEL_MIN_X_128 = 0x2F80;
+constexpr int32_t LEVEL_MAX_X_128 = 0xD080;
+constexpr int32_t GROUND_Y_128 = 0x2800;
 
 enum class TouchEffect {
     None,
@@ -75,6 +86,17 @@ struct Level {
     LevelCell get_cell(double x_pos, double y_pos, double z_pos) const;
     bool is_inside_tile(double x_pos, double y_pos, double z_pos) const;
     bool is_inside_tunnel(double x_pos, double y_pos, double z_pos) const;
+
+    // Integer fixed-point collision probes for the simulation tick: no
+    // float/double operations anywhere inside (the target console has no FPU).
+    // x here is 16.16 because will_land_on_tile accumulates x at that
+    // precision; a 1/128 caller passes `x_128 * 512`. y is 1/128, z is 16.16.
+    // Bit-exact images of the double probes above for on-grid inputs.
+    int32_t gravity_acceleration_128() const;
+    LevelCell get_cell_fp16(int32_t x_fp16, int32_t z_fp16) const;
+    bool is_inside_tile_128(int32_t x_128, int32_t y_128, int32_t z_fp16) const;
+    bool is_inside_tunnel_128(int32_t x_128, int32_t y_128,
+                              int32_t z_fp16) const;
 };
 
 Level level_from_road_entry(const RoadEntry& road);
