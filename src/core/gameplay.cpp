@@ -449,18 +449,19 @@ void Ship::handle_oxygen_and_fuel(const Level& level) {
 }
 
 void Ship::handle_fall_below_ground() {
+    // @0x2a95-0x2aa0, in full:  if (y < 0x2800) outcome = 3.
+    //
+    // That is the WHOLE of it. Nothing is zeroed, nothing is clamped. The port
+    // used to also null y_velocity, z_velocity, x_movement_base, the slide and
+    // the jump-o-master delta, and pin y to the road -- so the moment you went
+    // over an edge the world froze and the ship dropped straight down on the
+    // spot. In the original you keep every bit of the speed you had: z carries
+    // you on past the end of the road while update_gravity, seeing y below the
+    // road, pins the fall to terminal velocity (-106). That is the long,
+    // committed plunge away from the camera, and it is what makes falling read
+    // as falling rather than as the game stopping.
     if (state == ShipState::Alive && y_position_128 < GROUND_Y_128) {
         state = ShipState::Fallen;
-        y_position_128 = std::min(y_position_128, GROUND_Y_128);
-        y_velocity_128 = 0;
-        z_velocity_fp16 = 0;
-        x_movement_base_128 = 0;
-        slide_amount_128 = 0;
-        jump_o_master_velocity_delta_fp16 = 0;
-        jump_o_master_in_use = false;
-        has_run_jump_o_master = false;
-        is_on_ground = false;
-        is_going_up = false;
     }
 }
 

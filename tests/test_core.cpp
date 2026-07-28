@@ -187,12 +187,17 @@ static void test_fall_below_ground(const RoadsArchive& roads) {
     session.ship.z_velocity_fp16 = 6554; // ~0.1
     session.ship.x_movement_base_128 = 1 * 128;
 
+    const int32_t z_before = session.ship.z_position_fp16;
     GameplayFrameResult frame = session.run_frame(ControllerState::neutral());
     CHECK_TRUE(frame.snapshot.craft_state == ShipState::Fallen);
     CHECK_TRUE(session.death_frame_index.has_value());
-    CHECK_EQ(session.ship.z_velocity_fp16, 0);
-    CHECK_EQ(session.ship.y_velocity_128, 0);
-    CHECK_EQ(session.ship.x_movement_base_128, 0);
+    // @0x2a95-0x2aa0 sets the outcome and NOTHING else: the ship keeps the
+    // forward speed it had, so it flies on while it drops instead of stopping
+    // dead over the edge. Gravity pins the descent to terminal velocity because
+    // y is now below the road (@0x25c9).
+    CHECK_EQ(session.ship.z_velocity_fp16, 6554);
+    CHECK_TRUE(session.ship.z_position_fp16 > z_before);
+    CHECK_TRUE(session.ship.y_velocity_128 < 0); // still descending
     CHECK_TRUE(frame.events.empty());
 }
 
