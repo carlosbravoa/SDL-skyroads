@@ -552,15 +552,23 @@ void AttractModeApp::emit_empty_tank_alarm(std::vector<AudioCommand>& audio) {
     warn_blink_phase_ = phase;
 }
 
-// Picks the next in-game track. The original chooses at random and only guards
-// against repeating the previous one; we step deterministically instead so the
-// sequence is reproducible for tests, while still using all twelve and never
-// repeating back to back.
+// Picks the next in-game track, @0x29c-0x2c9. The randomness is real: 0x19c builds a
+// byte out of four live PIT counter reads (in al,0x40 twice then in al,0x41 twice,
+// added and xored together), so there is no seed and no sequence to reproduce. That
+// byte is taken mod 12, and if the result repeats the previous pick it steps on by
+// one, which is the only guarantee the original makes.
+//
+// The `% 12` on a 0..255 byte is left exactly as the EXE has it, bias included:
+// 256 is not a multiple of 12, so tracks 2..5 come up very slightly more often than
+// 6..13.
 uint8_t AttractModeApp::next_gameplay_song() {
-    const auto song =
-        static_cast<uint8_t>(GAMEPLAY_SONG_FIRST + gameplay_song_pick_);
-    gameplay_song_pick_ = (gameplay_song_pick_ + 1) % GAMEPLAY_SONG_COUNT;
-    return song;
+    std::uniform_int_distribution<int> random_byte(0, 255);
+    std::size_t pick = static_cast<std::size_t>(random_byte(rng_)) % GAMEPLAY_SONG_COUNT;
+    if (pick == gameplay_song_pick_) {
+        pick = (pick + 1) % GAMEPLAY_SONG_COUNT;
+    }
+    gameplay_song_pick_ = pick;
+    return static_cast<uint8_t>(GAMEPLAY_SONG_FIRST + pick);
 }
 
 // @0x229: an intro that returns "no key" sets the input source ds:0x9602 to 3, and

@@ -233,14 +233,12 @@ void Ship::attempt_motion(bool on_decel_pad) {
     if (!on_decel_pad) {
         motion_vel += 0x618; // @0x2646
     }
-    // @0x265a-0x2681: expected_x = x + slide + (x_movement_base * motion_vel)
-    // / 0x200. The EXE truncates that division; the reference instead kept the
-    // exact product and ROUNDED to the 1/128 grid in its sanitize step, and
-    // that (deliberate, demo-verified) port behavior is preserved here as a
-    // round-to-nearest. This is the one surviving quantization point of the
-    // old sanitize_parameters.
+    // @0x265a-0x2681: expected_x = x + (x_movement_base * motion_vel) / 0x200
+    // + slide. The divide helper @0x5e1c takes the absolute value of both
+    // operands, does an unsigned div and re-applies the sign, i.e. it TRUNCATES
+    // toward zero. C++ integer division does the same, so this is a plain /.
     const int32_t x_motion_512 = x_movement_base_128 * motion_vel;
-    x_position_128 += slide_amount_128 + round_half_away(x_motion_512, 512);
+    x_position_128 += slide_amount_128 + x_motion_512 / 512;
     // Motion keeps being integrated after death: the EXE's motion integrator
     // (@0x1900..0x1a9b) has no death-code gate, which is what lets a ship that
     // fell off the road keep dropping out of view. Only the *inputs* are cut
