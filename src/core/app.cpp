@@ -115,21 +115,26 @@ void emit_sfx_for_events(const std::vector<GameplayEvent>& events,
     }
 }
 
+// The simulation runs in integer fixed point; this is the once-per-tick
+// boundary where the renderer's double view of the ship is produced.
 ShipRenderState build_ship_render_state(const GameplaySession& session) {
     ShipRenderState s;
-    s.x_position = session.ship.x_position;
-    s.y_position = session.ship.y_position;
-    s.z_position = session.ship.z_position;
-    s.y_velocity = session.ship.y_velocity;
-    s.z_velocity =
-        session.ship.z_velocity + session.ship.jump_o_master_velocity_delta;
+    s.x_position = session.ship.x_position_128 / 128.0;
+    s.y_position = session.ship.y_position_128 / 128.0;
+    s.z_position = session.ship.z_position_fp16 / 65536.0;
+    s.y_velocity = session.ship.y_velocity_128 / 128.0;
+    s.z_velocity = (session.ship.z_velocity_fp16 +
+                    session.ship.jump_o_master_velocity_delta_fp16) /
+                   65536.0;
     s.state = session.ship.state;
     s.is_on_ground = session.ship.is_on_ground;
     s.is_going_up = session.ship.is_going_up;
     // Resting on a surface: that surface is right under us. Airborne: the surface we
     // left. Either way the shadow lands on solid ground rather than a fixed row.
-    s.support_y = session.ship.is_on_ground ? session.ship.y_position
-                                            : session.ship.jumped_from_y_position;
+    s.support_y = (session.ship.is_on_ground
+                       ? session.ship.y_position_128
+                       : session.ship.jumped_from_y_position_128) /
+                  128.0;
     s.turn_input = session.last_controls.turn_input;
     s.accel_input = session.last_controls.accel_input;
     s.jump_input = session.last_controls.jump_input;
@@ -479,7 +484,7 @@ void AttractModeApp::tick_gameplay(AppInput input,
             was_gameover_ = true;
             win_message_ticks_ = 0;
             road_end_ticks_ = 0;
-            gameplay_session_.ship.y_position = 0.0;
+            gameplay_session_.ship.y_position_128 = 0;
             const std::size_t flat =
                 go_menu_flat_index(selected_world_, selected_level_);
             // @0x39c is a plain `add WORD PTR [bx], 1` -- a 16-bit counter with no
@@ -492,7 +497,8 @@ void AttractModeApp::tick_gameplay(AppInput input,
         }
         if (road_end_ticks_ < ROAD_END_FLYOFF_TICKS && !input.escape) {
             road_end_ticks_ += 1;
-            gameplay_session_.ship.z_position += gameplay_session_.ship.z_velocity;
+            gameplay_session_.ship.z_position_fp16 +=
+                gameplay_session_.ship.z_velocity_fp16;
             return;
         }
         win_message_ticks_ += 1;
@@ -754,8 +760,9 @@ DemoPlaybackState AttractModeApp::current_gameplay_scene() const {
 
 DemoPlaybackState AttractModeApp::build_play_scene(const GameplaySession& session,
                                                   bool is_demo) const {
+    // floor(z * 8): an arithmetic shift of the 16.16 z.
     const std::size_t current_row = static_cast<std::size_t>(
-        std::max(std::floor(session.ship.z_position * 8.0), 0.0));
+        std::max<int32_t>(session.ship.z_position_fp16 >> 13, 0));
     const std::size_t current_group = current_row >> 3;
     const std::size_t start_row =
         current_group >= RENDER_ROWS_BEHIND ? current_group - RENDER_ROWS_BEHIND
@@ -779,8 +786,8 @@ DemoPlaybackState AttractModeApp::build_play_scene(const GameplaySession& sessio
     state.level_length = session.level.length();
     state.frame_index = session.frame_index();
     state.current_row = current_row;
-    state.fractional_z =
-        session.ship.z_position - (static_cast<double>(current_row) / 8.0);
+    state.fractional_z = session.ship.z_position_fp16 / 65536.0 -
+                         (static_cast<double>(current_row) / 8.0);
     state.rows = std::move(rows);
     state.did_win = session.did_win;
     state.is_demo = is_demo;
@@ -788,15 +795,17 @@ DemoPlaybackState AttractModeApp::build_play_scene(const GameplaySession& sessio
     state.is_final_road = !is_demo && current_road_is_final_;
     state.craft_state = session.ship.state;
     state.snapshot = GameSnapshot{
-        session.ship.x_position,
-        session.ship.y_position,
-        session.ship.z_position,
-        session.ship.z_velocity + session.ship.jump_o_master_velocity_delta,
+        session.ship.x_position_128 / 128.0,
+        session.ship.y_position_128 / 128.0,
+        session.ship.z_position_fp16 / 65536.0,
+        (session.ship.z_velocity_fp16 +
+         session.ship.jump_o_master_velocity_delta_fp16) /
+            65536.0,
         session.ship.state,
-        session.ship.oxygen_remaining / 0x7530,
-        session.ship.fuel_remaining / 0x7530,
+        session.ship.oxygen_remaining / static_cast<double>(0x7530),
+        session.ship.fuel_remaining / static_cast<double>(0x7530),
         session.ship.jump_o_master_in_use,
-        session.ship.jump_o_master_velocity_delta};
+        session.ship.jump_o_master_velocity_delta_fp16 / 65536.0};
     state.ship = build_ship_render_state(session);
     state.road_palette = session.level.palette;
     return state;
